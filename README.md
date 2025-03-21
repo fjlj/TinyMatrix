@@ -1,2 +1,6 @@
 # TinyMatrix
-This is a poorly written, hacked together, toy/demonstration of a half float/int matrix library 
+>  A poorly written, hacked together, toy/demo of an int16/ half float (16 bit float) matrix library... kind of... 
+---
+This Should not be used in production or really by anybody.... I'm certain it has a few bugs... I know it's poorly written and contains a lot of very bad coding conventions as well as many "hacks" that would make anyone cry... some of the code likely should be considered "undefined behavior". This was just a fun little project to try and slap together something quick to play around with making a small matrix library that operated on 16bit floats but could also just be used with 16bit ints. Good luck debugging anything with the function handler for the various mathematical operations all being handled by a "map" function via multiple overloads (many of which may also make you cry)... and function pointers.. but meh... I'll throw it up anyway, if not for nothing at least it can server as a reminder of a earlier years and motivation to "figure it out"... :)
+
+Note: This was originally written in 2018 because I was bored...
