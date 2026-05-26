@@ -284,6 +284,70 @@ void TestEdgeCases() {
     std::cout << " -> PASS" << std::endl;
 }
 
+void TestNeuralNetworkOps() {
+    std::cout << "Running TestNeuralNetworkOps (Activations, Derivatives, Hadamard)..." << std::endl;
+
+    // ---------------------------------------------------------
+    // 1. ReLU Activation
+    // Ensures negatives are clamped to 0, and positives survive.
+    // ---------------------------------------------------------
+    TinyMatrix M_Relu(2, 2, {-5.0, -0.1, 0.0, 3.5});
+    M_Relu.Relu();
+    assertFloatVal(M_Relu, 0, 0, 0.0f);
+    assertFloatVal(M_Relu, 0, 1, 0.0f);
+    assertFloatVal(M_Relu, 1, 0, 0.0f);
+    assertFloatVal(M_Relu, 1, 1, 3.5f);
+
+    // ---------------------------------------------------------
+    // 2. Sigmoid Activation
+    // Ensures the curve correctly squashes values between 0 and 1.
+    // ---------------------------------------------------------
+    TinyMatrix M_Sig(1, 3, {0.0, 2.0, -2.0});
+    M_Sig.Sigmoid();
+    assertFloatVal(M_Sig, 0, 0, 0.5f);          // Sigmoid(0) = 0.5
+    assertFloatVal(M_Sig, 0, 1, 0.8807f, 0.01f); // Sigmoid(2) ~ 0.88
+    assertFloatVal(M_Sig, 0, 2, 0.1192f, 0.01f); // Sigmoid(-2) ~ 0.11
+
+    // ---------------------------------------------------------
+    // 3. ReLU Derivative
+    // Ensures the gradient is exactly 1 for positives, 0 for negatives.
+    // ---------------------------------------------------------
+    TinyMatrix M_dRelu(2, 2, {-5.0, 0.0, 0.1, 100.0});
+    M_dRelu.D_Relu();
+    assertFloatVal(M_dRelu, 0, 0, 0.0f);
+    assertFloatVal(M_dRelu, 0, 1, 0.0f); // 0 is generally routed to 0 in dReLU
+    assertFloatVal(M_dRelu, 1, 0, 1.0f);
+    assertFloatVal(M_dRelu, 1, 1, 1.0f);
+
+    // ---------------------------------------------------------
+    // 4. Sigmoid Derivative
+    // Crucial Backprop test: Assumes input is an ALREADY ACTIVATED output.
+    // Formula: output * (1 - output)
+    // ---------------------------------------------------------
+    TinyMatrix M_dSig(1, 2, {0.5, 0.8807});
+    M_dSig.D_Sigmoid();
+    assertFloatVal(M_dSig, 0, 0, 0.25f);          // 0.5 * (1 - 0.5) = 0.25
+    assertFloatVal(M_dSig, 0, 1, 0.1049f, 0.01f); // 0.8807 * (1 - 0.8807) ~ 0.105
+
+    // ---------------------------------------------------------
+    // 5. Hadamard Product (Element-wise Multiplication)
+    // Tests that A * B aligns element-by-element, AND tests that
+    // it correctly auto-promotes an Int matrix to a Float matrix.
+    // ---------------------------------------------------------
+    TinyMatrix H1(2, 2, {1, 2, 3, 4}); // Started as an Int matrix
+    TinyMatrix H2(2, 2, {0.5, 1.5, -2.0, 10.0});
+
+    H1.hadamard(H2);
+
+    assert(H1.IsFloat() == true); // Ensure type promotion triggered
+    assertFloatVal(H1, 0, 0, 0.5f);  // 1 * 0.5
+    assertFloatVal(H1, 0, 1, 3.0f);  // 2 * 1.5
+    assertFloatVal(H1, 1, 0, -6.0f); // 3 * -2.0
+    assertFloatVal(H1, 1, 1, 40.0f); // 4 * 10.0
+
+    std::cout << " -> PASS" << std::endl;
+}
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "      TinyMatrix Test Suite Started       \n";
@@ -294,6 +358,7 @@ int main() {
     TestMatrixMath();
     TestDotProduct();
     TestTypePromotion();
+    TestNeuralNetworkOps();
     TestUnusualUses();
     TestEdgeCases();
 

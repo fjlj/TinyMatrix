@@ -1,10 +1,11 @@
 #pragma once
 #include <assert.h>
 #include <iostream>
+#include <cmath>
 #include <initializer_list> // Added for safe variadics
 
 enum mapFuncs {
-    TPOS, PRINT, ADDS, SUBS, MULS, DOT, SUM, SUB, ADD, ADDR, SUBR, INTS, MULFS
+    TPOS, PRINT, ADDS, SUBS, MULS, DOT, SUM, SUB, ADD, ADDR, SUBR, INTS, MULFS, RELU, SIGMOID, D_RELU, D_SIGMOID, HADAMARD
 };
 
 typedef uint16_t HALF;
@@ -110,6 +111,11 @@ public:
     TinyMatrix& multiply(int s);
     TinyMatrix& multiply(float s);
     TinyMatrix& multiply(double s);
+    TinyMatrix& Relu();
+    TinyMatrix& Sigmoid();
+    TinyMatrix& D_Relu();
+    TinyMatrix& D_Sigmoid();
+    TinyMatrix& hadamard(const TinyMatrix& a);
     void print(std::string extra = "");
 
     TinyMatrix& transpose();

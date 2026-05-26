@@ -44,22 +44,51 @@ float mul(float val, float s, int _notused, TinyMatrix* _notused2) {
     return val * s;
 };
 
-void* mFuncs[13] = { 
-    &tpos,  //TPOS
-    &print, //PRINT 
-    &add,   //ADDS
-    &sub,   //SUBS
-    &mul,   //MULS
-    &mul,   //DOT
-    &mul,   //SUM
-    &sub2,  //SUB
-    &add2,  //ADD
-    &add2,  //ADDR
-    &sub2,  //SUBR
-    &add2,  //INTS
-    &mul    //MULFS
+float relu(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
+    // Add epsilon to prevent floating point noise from activating dead neurons
+    return val > 0.0001f ? val : 0.0f;
+}
+
+float d_relu(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
+    // Add epsilon to gradient calculations
+    return val > 0.0001f ? 1.0f : 0.0f;
+}
+
+float sigmoid(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
+    return 1.0f / (1.0f + std::exp(-val));
+}
+
+// Sigmoid Derivative: output * (1 - output)
+float d_sigmoid(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
+    return val * (1.0f - val);
+}
+
+// Element-wise Matrix Multiplication
+float hadamard(float val, float r, int c, TinyMatrix* d) {
+    return val * (float)(*d)((int)r, c);
 };
-char  mFuncs_t[13] = {
+
+void* mFuncs[18] = { 
+    &tpos,       //TPOS
+    &print,      //PRINT 
+    &add,        //ADDS
+    &sub,        //SUBS
+    &mul,        //MULS
+    &mul,        //DOT
+    &mul,        //SUM
+    &sub2,       //SUB
+    &add2,       //ADD
+    &add2,       //ADDR
+    &sub2,       //SUBR
+    &add2,       //INTS
+    &mul,        //MULFS
+    &relu,       // RELU
+    &sigmoid,    // SIGMOID
+    &d_relu,     // D_RELU
+    &d_sigmoid,  // D_SIGMOID
+    &hadamard    // HADAMARD
+};
+char  mFuncs_t[18] = {
     (NOT_VOID | NEEDS_COPY),                        //Transpose
     (NEEDS_VAL),                                    //Print
     (NOT_VOID | NEEDS_VAL),                         //Add scalar ADDS
@@ -72,7 +101,12 @@ char  mFuncs_t[13] = {
     (NOT_VOID | NEEDS_COPY | NEEDS_OTHER | RESHAPE), //Subtract 1 matrix from self (reshape fill empty with 0s)
     (NOT_VOID | NEEDS_COPY | NEEDS_OTHER | RESHAPE), //add matrix to self (reshape fill empty with 0s)
     (NOT_VOID | NEEDS_COPY),                         //converts half float matrix back to int16_t matrix
-    (NOT_VOID | NEEDS_VAL | AS_FLOAT)                //multiply by float scalar...
+    (NOT_VOID | NEEDS_VAL | AS_FLOAT),                //multiply by float scalar...
+    (NOT_VOID | NEEDS_VAL), // RELU (Just reads the val and overwrites it)
+    (NOT_VOID | NEEDS_VAL),  // SIGMOID
+    (NOT_VOID | NEEDS_VAL),                 // D_RELU
+    (NOT_VOID | NEEDS_VAL),                 // D_SIGMOID
+    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER)   // HADAMARD
 };
 
 
@@ -218,7 +252,7 @@ float TinyMatrix::halfToFloat(mHalf y)
     }
     else if (y.parts.Exp == 31) {
         ret.parts.Exp = 0xff;
-        ret.parts.Frac = (y.parts.Frac != 0);
+        ret.parts.Frac = (y.parts.Frac != 0) ? 0x400000 : 0;
     }
     else {
 
@@ -231,6 +265,21 @@ float TinyMatrix::halfToFloat(mHalf y)
 
 HALF TinyMatrix::floatToHalf(mFloat i)
 {
+    if(i.fVal == 0.0f || i.fVal == -0.0f) {
+        mHalf zero(0);
+        zero.parts.Sign = i.parts.Sign;
+        return zero.uVal;
+    }
+    
+    if(i.parts.Exp == 0xff) {
+        mHalf special(0);
+        special.parts.Sign = i.parts.Sign;
+        special.parts.Exp = 31;
+        // If it was NaN (Frac != 0), keep the Frac non-zero. Otherwise 0 for Inf.
+        special.parts.Frac = (i.parts.Frac != 0) ? 1 : 0;
+        return special.uVal;
+    }
+
     mHalf ret(0);
     ret.parts.Sign = i.parts.Sign;
     int _3precision = (int)floor((i.fVal * 1000.0f));
@@ -383,10 +432,33 @@ void TinyMatrix::print(std::string extra)
     printf("%s", extra.c_str());
 }
 
+TinyMatrix& TinyMatrix::Relu() {
+    this->map(mapFuncs::RELU);
+    return *this;
+}
+
+TinyMatrix& TinyMatrix::Sigmoid() {
+    this->map(mapFuncs::SIGMOID);
+    return *this;
+}
 
 TinyMatrix& TinyMatrix::transpose()
 {
     this->map(mapFuncs::TPOS);
+    return *this;
+}
+TinyMatrix& TinyMatrix::D_Relu() {
+    this->map(mapFuncs::D_RELU);
+    return *this;
+}
+
+TinyMatrix& TinyMatrix::D_Sigmoid() {
+    this->map(mapFuncs::D_SIGMOID);
+    return *this;
+}
+
+TinyMatrix& TinyMatrix::hadamard(const TinyMatrix& a) {
+    this->map(mapFuncs::HADAMARD, (void*)&a);
     return *this;
 }
 
@@ -474,6 +546,7 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::ADD:
                     case mapFuncs::SUBR:
                     case mapFuncs::ADDR:
+                    case mapFuncs::HADAMARD:
                         assert(o2_ret != nullptr);
                         if (o2_copy == nullptr && (mFuncs_t[n] & RESHAPE) || ((TinyMatrix*)o2_ret)->rows != scratchNib->rows && ((TinyMatrix*)o2_ret)->cols != scratchNib->cols) {
                             o2_copy = new TinyMatrix(*(TinyMatrix*)o2_ret);
@@ -495,23 +568,38 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                         }
                         break;
                     }
-                } 
-                else {
-                    switch (n) {
+                } else {
+                    switch(n) {
+                        // --- SCALAR MATH ---
                     case mapFuncs::ADDS:
                     case mapFuncs::SUBS:
                     case mapFuncs::MULS:
                     case mapFuncs::MULFS:
-                    default:
-                        if (this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
+                        if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
+                            // Reads the scalar value from o2_ret safely
                             (*this)(i, j, foo(val, *(float*)o2_ret, 0, nullptr));
-                        }
-                        else {
+                        } else {
                             (*this)(i, j, (int16_t)foo(val, (int16_t)(*(float*)o2_ret), 0, nullptr));
                         }
                         break;
-                    }
 
+                        // --- NEURAL NETWORK ACTIVATIONS ---
+                    case mapFuncs::RELU:
+                    case mapFuncs::SIGMOID:
+                    case mapFuncs::D_RELU:
+                    case mapFuncs::D_SIGMOID:
+                        // These are unary. o2_ret is nullptr! 
+                        // We pass a dummy 0.0f instead of dereferencing a pointer.
+                        if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
+                            (*this)(i, j, foo(val, 0.0f, 0, nullptr));
+                        } else {
+                            (*this)(i, j, (int16_t)foo(val, 0.0f, 0, nullptr));
+                        }
+                        break;
+
+                    default:
+                        break;
+                    }
                 }
             } 
             else {
