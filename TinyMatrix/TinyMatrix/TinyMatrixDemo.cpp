@@ -7,13 +7,13 @@ constexpr auto int16_rand(T gen) { return ((rand() % gen) - (gen/4)); }
 
 int main()
 {
-    TinyMatrix myMatrix3(1, 3, 0);  //1 row, 3 columns, indexed from 0
-    TinyMatrix myMatrix4(3, 1, 1);  //3 rows 1 columns, indexed from 1
-    TinyMatrix myMatrix1(3, 2, 1);
-    TinyMatrix myMatrix5(3, 3, 0);
-    TinyMatrix myMatrix6(2, 2, 1);
-    TinyMatrix myMatrix7(2, 4, 0);
-    TinyMatrix myMatrix8(4, 2, 0);
+    TinyMatrix myMatrix3(1, 3);  //1 row, 3 columns, indexed from 0
+    TinyMatrix myMatrix4(3, 1);  //3 rows 1 columns, indexed from 1
+    TinyMatrix myMatrix1(3, 2);
+    TinyMatrix myMatrix5(3, 3);
+    TinyMatrix myMatrix6(2, 2);
+    TinyMatrix myMatrix7(2, 4);
+    TinyMatrix myMatrix8(4, 2);
 
     srand(0xBA550B0E);
     //srand((unsigned int)((unsigned long long int)((void*)&main)) + clock());
@@ -43,23 +43,23 @@ int main()
 
                 if (i < myMatrix3.Rows() && j < myMatrix3.Cols()) {
                     trand = int16_rand(20);
-                    myMatrix3(i + myMatrix3.IndexMode(), j + myMatrix3.IndexMode(), trand);
+                    myMatrix3(i, j, trand);
                 }
                 if (i < myMatrix4.Rows() && j < myMatrix4.Cols()) {
                     trand = int16_rand(20);
-                    myMatrix4(i + myMatrix4.IndexMode(), j + myMatrix4.IndexMode(), trand);
+                    myMatrix4(i, j, trand);
                 }
                 if (i < myMatrix1.Rows() && j < myMatrix1.Cols()) {
                     trand = int16_rand(20);
-                    myMatrix1(i + myMatrix1.IndexMode(), j + myMatrix1.IndexMode(), trand);
+                    myMatrix1(i, j, trand);
                 }
                 if (i < myMatrix5.Rows() && j < myMatrix5.Cols()) {
                     trand = int16_rand(20);
-                    myMatrix5(i + myMatrix5.IndexMode(), j + myMatrix5.IndexMode(), trand);
+                    myMatrix5(i, j, trand);
                 }
                 if (i < myMatrix6.Rows() && j < myMatrix6.Cols()) {
                     trand = int16_rand(20);
-                    myMatrix6(i + myMatrix6.IndexMode(), j + myMatrix6.IndexMode(), trand);
+                    myMatrix6(i, j, trand);
                 }
             }
             else {
@@ -81,7 +81,7 @@ int main()
    
     printf("M2 dot M1\n");
     //make a matrix to store answer of dot product
-    TinyMatrix tDota(myMatrix2.Rows(), myMatrix1.Cols(), 0);
+    TinyMatrix tDota(myMatrix2.Rows(), myMatrix1.Cols());
     tDota.dot(myMatrix2, myMatrix1).print("\n");
 
     //result matrix will size itself also demo pointer working...
@@ -136,13 +136,13 @@ int main()
     float myMatrix7_sum = myMatrix7.sum();
     printf("M7 SUM:\n%.3f\n\n", myMatrix7_sum);
 
-    //variatic declaration, {Rows,Cols,index mode[0,1],floats....}
-    TinyMatrix m8(4, 2, 0, -1.712, -0.412, 0.507, 0.990, 1.309, 0.482, -0.758, -0.498 );
+    // variatic float creation...
+    TinyMatrix m8(4, 2, {-1.712, -0.412, 0.507, 0.990, 1.309, 0.482, -0.758, -0.498});
     printf("variatic float creation...\n");
     m8.print("\n");
 
-    //variatic declaration, {Rows,Cols,index mode[0,1],ints....}
-    TinyMatrix m9(3, 3, 0, 88, 23, 34, 76, 2, 34, 44, 92, 12);
+    // variatic int creation...
+    TinyMatrix m9(3, 3, {88, 23, 34, 76, 2, 34, 44, 92, 12});
     printf("variatic int creation...\n");
     m9.print("\n");
 
