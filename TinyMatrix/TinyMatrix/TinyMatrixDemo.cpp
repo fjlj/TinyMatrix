@@ -1,255 +1,305 @@
 #include "TinyMatrix.h"
+#include <iostream>
+#include <cassert>
+#include <cmath>
+#include <string>
+#include <limits>
 
-template<typename T>
-constexpr auto int16_rand(T gen) { return ((rand() % gen) - (gen/4)); } 
-
-
-
-int main()
-{
-    TinyMatrix myMatrix3(1, 3);  //1 row, 3 columns, indexed from 0
-    TinyMatrix myMatrix4(3, 1);  //3 rows 1 columns, indexed from 1
-    TinyMatrix myMatrix1(3, 2);
-    TinyMatrix myMatrix5(3, 3);
-    TinyMatrix myMatrix6(2, 2);
-    TinyMatrix myMatrix7(2, 4);
-    TinyMatrix myMatrix8(4, 2);
-
-    srand(0xBA550B0E);
-    //srand((unsigned int)((unsigned long long int)((void*)&main)) + clock());
-    
-    //set a value of matrix (row,col,value)
-    myMatrix7(0, 0, 3.1415927f); 
-    printf("Get a Value:%f\n", (float)myMatrix7(0, 0));
-    for (int r = 0; r < 8; r++) {
-        float fr = (float)((double)rand() / (double)(RAND_MAX) * 2) - 1.0f;
-        float fr2 = (float)((double)rand() / (double)(RAND_MAX) * 2) - 1.0f;
-        myMatrix7(r / 4, r % 4, fr);
-        myMatrix8(r % 4, r / 4, fr2);
+// Helper to test half-float precision AND ensure the matrix is in Float mode
+void assertFloatVal(TinyMatrix& m, int r, int c, float expected, float epsilon = 0.05f) {
+    if(!m.IsFloat()) {
+        std::cerr << "Type Assertion Failed! Expected Float matrix, but got Int matrix." << std::endl;
+        assert(false);
     }
 
-    
+    float actual = m(r, c);
+    if(std::abs(actual - expected) > epsilon) {
+        std::cerr << "Float Math Failed! Expected: " << expected << " but got: " << actual << std::endl;
+        assert(false);
+    }
+}
 
-    int16_t trand = 0;
-
-    
-    //nasty loop to initialize matricies
-    for (int i = 0; i < 10; i++) {
-        for (int j = 0; j < 10; j++) {
-            if ((i < myMatrix3.Rows() || i < myMatrix4.Rows() || i < myMatrix1.Rows() 
-                   || i < myMatrix5.Rows() || i < myMatrix6.Rows() || i < myMatrix7.Rows()) &&
-                (j < myMatrix3.Cols() || j < myMatrix4.Cols() || j < myMatrix1.Cols() 
-                   || j < myMatrix5.Cols() || j < myMatrix6.Cols() || j < myMatrix7.Cols())) {
-
-                if (i < myMatrix3.Rows() && j < myMatrix3.Cols()) {
-                    trand = int16_rand(20);
-                    myMatrix3(i, j, trand);
-                }
-                if (i < myMatrix4.Rows() && j < myMatrix4.Cols()) {
-                    trand = int16_rand(20);
-                    myMatrix4(i, j, trand);
-                }
-                if (i < myMatrix1.Rows() && j < myMatrix1.Cols()) {
-                    trand = int16_rand(20);
-                    myMatrix1(i, j, trand);
-                }
-                if (i < myMatrix5.Rows() && j < myMatrix5.Cols()) {
-                    trand = int16_rand(20);
-                    myMatrix5(i, j, trand);
-                }
-                if (i < myMatrix6.Rows() && j < myMatrix6.Cols()) {
-                    trand = int16_rand(20);
-                    myMatrix6(i, j, trand);
-                }
-            }
-            else {
-                break;
-            }
-        }
+// Helper to test integer math AND ensure the matrix is in Int mode
+void assertIntVal(TinyMatrix& m, int r, int c, int expected) {
+    if(m.IsFloat()) {
+        std::cerr << "Type Assertion Failed! Expected Int matrix, but got Float matrix." << std::endl;
+        assert(false);
     }
 
-    TinyMatrix myMatrix2(myMatrix1); //2 is a copy of 1
+    int actual = (int)m(r, c); // Cast the return value back to int for strict comparison
+    if(actual != expected) {
+        std::cerr << "Int Math Failed! Expected: " << expected << " but got: " << actual << std::endl;
+        assert(false);
+    }
+}
 
-    printf("M1\n");
-    myMatrix1.print("\n"); //prints matrix + any string provided
+void TestInitialization() {
+    std::cout << "Running TestInitialization..." << std::endl;
 
-    printf("M1(reshape)\n");
-    myMatrix1.Shape(2, 3).print("\n");
+    // Test Int Initialization
+    TinyMatrix m1(2, 2, {1, 2, 3, 4});
+    assert(m1.Rows() == 2 && m1.Cols() == 2);
+    assertIntVal(m1, 0, 0, 1);
+    assertIntVal(m1, 1, 1, 4);
 
-    printf("M2\n");
-    myMatrix2.print("\n");
-   
-    printf("M2 dot M1\n");
-    //make a matrix to store answer of dot product
-    TinyMatrix tDota(myMatrix2.Rows(), myMatrix1.Cols());
-    tDota.dot(myMatrix2, myMatrix1).print("\n");
+    // Test Float Initialization
+    TinyMatrix m2(2, 2, {1.5, -2.5, 3.14, 4.0});
+    assert(m2.Rows() == 2 && m2.Cols() == 2);
+    assertFloatVal(m2, 0, 0, 1.5f);
+    assertFloatVal(m2, 0, 1, -2.5f);
 
-    //result matrix will size itself also demo pointer working...
-    printf("M2 dot M1 (self sized)\n");
-    TinyMatrix* tDot = new TinyMatrix;
-    tDot->dot(myMatrix2, myMatrix1).print("\n");
+    // Test Read/Write element access (Int)
+    m1(0, 1, 99);
+    assertIntVal(m1, 0, 1, 99);
 
-    //other matricies for transpose/dot intro
-    printf("M3\n");
-    myMatrix3.print("\n"); 
+    std::cout << " -> PASS" << std::endl;
+}
 
-    printf("M4\n");
-    myMatrix4.print("\n");
-    
-    //you can transpose a matrix manually, if matricies are compatible .dot will auto transpose second parameter
-    printf("M3 dot M4 (resize, transpose manually)\n");
-    tDot->dot(myMatrix3, myMatrix4.transpose()).print("\n");
+void TestScalarMath() {
+    std::cout << "Running TestScalarMath (Strict Types)..." << std::endl;
 
-    delete tDot;
+    TinyMatrix m_int(2, 2, {10, 20, 30, 40});
+    TinyMatrix m_float(2, 2, {1.5, 2.5, 3.5, 4.5});
 
-    //change it back manually, manual transpose modifies in place;
-    myMatrix4.transpose();
-    
-    //auto transpose, this will return dot product of a matrix and its transpose
-    printf("M4 dot M4\n");
-    tDota.dot(myMatrix4).print("\n");
-    
-    //you can change the shape of a matrix and its data structure will resize.
-    //(default relative positioning, values are shifted to fit size, extra space will be 0 filled,
-    //resizing to a smaller size will truncate values outside of the range).
-    //specify 3rd optional parameter as true to use absolute positioning...(covered later)
-    printf("M3 dot M4\n");
-    tDota.Shape(myMatrix3.Rows(), myMatrix4.Cols()).dot(myMatrix3, myMatrix4).print("\n");
-    
-    //setting up a 3x3 matrix to show scalars and matrix +,
-    printf("M4 dot M3\n");
-    tDota.dot(myMatrix4, myMatrix3).print("\n");
-    
-    //add by scalar
-    printf("Previous+1\n");
-    tDota.add(1).print("\n");
-    
-    //get sum of an int16_t array
-    int32_t tDot_sum = tDota.sum();
-    printf("SUM:\n%ld\n\n", tDot_sum);
+    // --- Int Matrix Math (Must remain Int) ---
+    m_int.add(5);
+    assertIntVal(m_int, 0, 0, 15);
 
-    //half float matrix being used in more scalar operations (int16_t is also supported)
-    printf("M7\n");
-    myMatrix7.print("\n");
+    m_int.sub(10);
+    assertIntVal(m_int, 0, 0, 5);
 
-    //get sum of a half float array (2 byte float implimentation ~3.3 decimal precision)
-    float myMatrix7_sum = myMatrix7.sum();
-    printf("M7 SUM:\n%.3f\n\n", myMatrix7_sum);
+    m_int.multiply(2);
+    assertIntVal(m_int, 0, 0, 10);
 
-    // variatic float creation...
-    TinyMatrix m8(4, 2, {-1.712, -0.412, 0.507, 0.990, 1.309, 0.482, -0.758, -0.498});
-    printf("variatic float creation...\n");
-    m8.print("\n");
+    // --- Float Matrix Math (Must remain Float) ---
+    m_float.add(1.5f);
+    assertFloatVal(m_float, 0, 0, 3.0f);
 
-    // variatic int creation...
-    TinyMatrix m9(3, 3, {88, 23, 34, 76, 2, 34, 44, 92, 12});
-    printf("variatic int creation...\n");
-    m9.print("\n");
+    m_float.multiply(2.0f);
+    assertFloatVal(m_float, 0, 0, 6.0f);
 
-    //multiply by a scalar
-    printf("M7*2\n");
-    myMatrix7.multiply(2).print("\n");
-    
-    //subtract by a scalar
-    printf("M7-5\n");
-    myMatrix7.sub(5).print("\n");
+    std::cout << " -> PASS" << std::endl;
+}
 
-    //addition by a scalar
-    printf("M7+0.12\n");
-    myMatrix7.add(0.12).print("\n");
-    
-    //displaying additional matrix to be used in the next operations
-    printf("M8\n");
-    myMatrix8.print("\n");
+void TestMatrixMath() {
+    std::cout << "Running TestMatrixMath (A + B, A - B)..." << std::endl;
 
-    //add matricies auto re-shape 2nd param true to auto reshape.. 
-    //this does a relative reshape of passed in matrix without altering original
-    printf("M7+M8\n");
-    myMatrix7.add(myMatrix8,true).print("\n");
+    // Int Matrices
+    TinyMatrix A_int(2, 2, {10, 20, 30, 40});
+    TinyMatrix B_int(2, 2, {1,  2,  3,  4});
 
-    //same thing... but alters original via manual transpose
-    printf("M7+M8\n");
-    myMatrix7.add(myMatrix8.transpose()).print("\n");
+    // Float Matrices
+    TinyMatrix C_flt(2, 2, {1.5, 2.5, 3.5, 4.5});
+    TinyMatrix D_flt(2, 2, {0.5, 0.5, 0.5, 0.5});
 
-    //same thing... alters originals
-    printf("M8+M7\n");
-    myMatrix8.transpose().add(myMatrix7.transpose()).print("\n");
+    // Test Int Addition/Subtraction
+    A_int.add(B_int);
+    assertIntVal(A_int, 0, 0, 11);
 
-    //subtract matricies of same shape above applies
-    printf("M7 - M8\n");
-    myMatrix7.sub(myMatrix8).print("\n");
+    A_int.sub(B_int);
+    assertIntVal(A_int, 0, 0, 10); // Should return to original int value
 
+    // Test Float Addition/Subtraction
+    C_flt.add(D_flt);
+    assertFloatVal(C_flt, 0, 0, 2.0f);
 
-    //used above, printing for use ahead...
-    printf("tDota\n");
-    tDota.print("\n");
+    std::cout << " -> PASS" << std::endl;
+}
 
-    //manually reshape float matrix to match shape of tDota int matrix and add them. 
-    //absolute (3rd parameter 'true') maps row/col positions 1:1 0 fill any that dont map within new shape.
-    printf("absolute reshaped M7\n");
-    myMatrix7.Shape(tDota.Rows(), tDota.Cols(),true).print("\n");
+void TestDotProduct() {
+    std::cout << "Running TestDotProduct (Pointer Aliasing & Types)..." << std::endl;
 
-    //add floats to converts int16_t matrix to half float matrix
-    printf("M7 + tDota\n");
-    myMatrix7.add(tDota).print("\n");
+    TinyMatrix A_int(2, 3, {1, 2, 3, 4, 5, 6});
+    TinyMatrix B_int(3, 2, {7, 8, 9, 10, 11, 12});
+    TinyMatrix Output_int(1, 1);
 
-    printf("tDota\n");
-    tDota.print("\n");
-    //reshape float matrix to match shape of tDota int matrix and add them.
-    //math operations on ints with half floats will convert to half float...
-    //relative (no or false 3rd parameter) maps data positions as they are stored.
-    //wrapping to match shape.. 0 fill extra space, truncate missing space.
-    printf("relative reshaped M7\n");
-    myMatrix7.Shape(tDota.Rows(), tDota.Cols()).print("\n");
-    printf("tDota - relative reshaped M7\n");
-    tDota.sub(myMatrix7).print("\n");
+    // Basic Int Dot Product
+    Output_int.dot(A_int, B_int);
+    assertIntVal(Output_int, 0, 0, 58);  // 1*7 + 2*9 + 3*11 = 58
+    assertIntVal(Output_int, 1, 1, 154); // 4*8 + 5*10 + 6*12 = 154
 
-    //add ints to floats, remains a half float matrix however....
-    //.Ints() converts a half float matrix to an int16_t matrix
-     printf("tDota + M7\n");
-    tDota.add(myMatrix7.Ints()).print("\n");
+    // Test Pointer Aliasing Bug Fix! 
+    A_int.dot(A_int, B_int);
+    assertIntVal(A_int, 0, 0, 58);
 
-    //showing that .Ints converted this back to an int16_t matrix
-    printf("M7 after .Ints()\n");
-    myMatrix7.print("\n");
+    // Float Dot Product
+    TinyMatrix C_flt(2, 2, {1.5, 2.0, 3.5, 4.0});
+    TinyMatrix D_flt(2, 2, {2.0, 1.0, 0.5, 2.5});
+    C_flt.dot(C_flt, D_flt);
+    assertFloatVal(C_flt, 0, 0, 4.0f); // 1.5*2 + 2.0*0.5 = 4.0
 
-    //scalar float multiplication with int matrix
-    printf("M7 * 0.5\n");
-    myMatrix7.multiply(0.5).print("\n");
+    std::cout << " -> PASS" << std::endl;
+}
 
-    //scalar float multiplication with float matrix
-    printf("M7 * -2.25\n");
-    myMatrix7.multiply(-2.25).print("\n");
+void TestTypePromotion() {
+    std::cout << "Running TestTypePromotion..." << std::endl;
 
-    //different reshape demos.... relative/absolute, auto/manual... etc.
-    printf("M5\n");
-    myMatrix5.print("\n");
+    TinyMatrix IntMat(2, 2, {1, 2, 3, 4});
+    TinyMatrix FloatMat(2, 2, {0.5, 0.5, 0.5, 0.5});
 
-    printf("M6\n");
-    myMatrix6.print("\n");
+    // Int matrix + Float matrix = Should promote to Float matrix
+    IntMat.add(FloatMat);
+    assertFloatVal(IntMat, 0, 0, 1.5f);
 
-    printf("M5 + M6 (auto absolute reshape)\n");
-    myMatrix5.add(myMatrix6, true).print("\n");
+    // Test demotion back to Ints
+    IntMat.Ints();
+    assertIntVal(IntMat, 0, 0, 1); // Truncates 1.5 -> 1 and resets state to Int
 
-    printf("M6 after(unmodified by auto reshape):\n");
-    myMatrix6.print("\n");
+    // Float multiplication on an Int matrix should promote to Float
+    TinyMatrix IntMat2(2, 2, {10, 20, 30, 40});
+    IntMat2.multiply(0.5f);
+    assertFloatVal(IntMat2, 0, 0, 5.0f);
 
-    printf("M6 relative reshape larger:\n");
-    myMatrix6.Shape(myMatrix6.Rows() + 2, myMatrix6.Cols() + 2).print("\n");
+    std::cout << " -> PASS" << std::endl;
+}
 
-    printf("M6 after(modified by manual reshape):\n");
-    myMatrix6.print("\n");
+void TestUnusualUses() {
+    std::cout << "Running TestUnusualUses (Cryptography, Graph Theory, Data Flattening)..." << std::endl;
 
-    printf("M6 relative reshape smaller:\n");
-    myMatrix6.Shape(myMatrix6.Rows()-2, myMatrix6.Cols()-2).print("\n");
+    // ---------------------------------------------------------
+    // Unusual Use 1: Parallel Cryptography (Caesar Cipher)
+    // Matrices don't just hold math; they hold ASCII. By putting 
+    // characters into an Int matrix, we can use the scalar math 
+    // engine to encrypt/decrypt an entire string simultaneously!
+    // ---------------------------------------------------------
+    TinyMatrix CipherText(1, 4, {'W', 'O', 'R', 'D'});
 
-    printf("M6 absolute reshape larger:\n");
-    myMatrix6.Shape(myMatrix6.Rows() + 2, myMatrix6.Cols() + 2,true).print("\n");
+    // Encrypt by shifting the ASCII values up by 5
+    CipherText.add(5);
+    assertIntVal(CipherText, 0, 0, 'W' + 5); // 'W' becomes '\'
+    assertIntVal(CipherText, 0, 1, 'O' + 5); // 'O' becomes 'T'
 
-    printf("M6 absolute reshape smaller:\n");
-    myMatrix6.Shape(myMatrix6.Rows()-2, myMatrix6.Cols()-2,true).print("\n");
+    // Decrypt it back
+    CipherText.sub(5);
+    assertIntVal(CipherText, 0, 0, 'W');
+    assertIntVal(CipherText, 0, 3, 'D');
 
 
-    
-     return 0;
+    // ---------------------------------------------------------
+    // Unusual Use 2: Graph Theory (Network Routing)
+    // An adjacency matrix represents connections. Node 0 connects 
+    // to Node 1, Node 1 to Node 2. Squaring this matrix (Dot Product 
+    // with itself) magically calculates the number of 2-step paths!
+    // ---------------------------------------------------------
+    TinyMatrix Network(3, 3, {
+        0, 1, 0,  // Node 0 connects to Node 1
+        0, 0, 1,  // Node 1 connects to Node 2
+        0, 0, 0   // Node 2 connects to nowhere
+        });
+
+    // Dot product of the network with itself
+    Network.dot(Network, Network);
+
+    // The engine should automatically calculate that there is exactly 
+    // ONE path of length 2 that goes from Node 0 to Node 2 (0 -> 1 -> 2).
+    assertIntVal(Network, 0, 2, 1);
+    // And zero paths of length 2 from Node 1 to anywhere.
+    assertIntVal(Network, 1, 2, 0);
+
+
+    // ---------------------------------------------------------
+    // Unusual Use 3: Data Flattening (1D Stream Conversion)
+    // Because your Shape() function maps data sequentially, we can 
+    // take a 2D image/grid and instantly flatten it into a 1D 
+    // network packet stream without doing any math at all.
+    // ---------------------------------------------------------
+    TinyMatrix Grid2D(2, 2, {
+        11, 22,
+        33, 44
+        });
+
+    // Flatten to 1 Row, 4 Columns
+    Grid2D.Shape(1, 4);
+
+    // Verify the data survived the dimensional shift intact
+    assert(Grid2D.Rows() == 1 && Grid2D.Cols() == 4);
+    assertIntVal(Grid2D, 0, 0, 11);
+    assertIntVal(Grid2D, 0, 2, 33);
+    assertIntVal(Grid2D, 0, 3, 44);
+
+    std::cout << " -> PASS" << std::endl;
+}
+void TestEdgeCases() {
+    std::cout << "Running TestEdgeCases (NaN, Infinity, and Deep Copies)..." << std::endl;
+
+    // ---------------------------------------------------------
+    // Edge Case 1: Extreme IEEE-754 Float Math
+    // The maximum possible value for a 16-bit float is ~65504.0.
+    // We will test the max bounds, Positive Infinity, Negative 
+    // Infinity, and a pure NaN (Not-a-Number).
+    // ---------------------------------------------------------
+    float inf = std::numeric_limits<float>::infinity();
+    float nan = std::numeric_limits<float>::quiet_NaN();
+    float max_half = 65504.0f;
+
+    TinyMatrix ExtremeMat(2, 2, {inf, -inf, nan, max_half});
+
+    // The floatToHalf and halfToFloat bit-shifters must perfectly 
+    // maintain the integrity of these special CPU flags.
+
+    // Check Pos/Neg Infinity
+    assert(std::isinf(ExtremeMat(0, 0)));
+    assert(ExtremeMat(0, 0) > 0);
+
+    assert(std::isinf(ExtremeMat(0, 1)));
+    assert(ExtremeMat(0, 1) < 0);
+
+    // Check pure NaN (std::isnan is required because NaN != NaN)
+    assert(std::isnan(ExtremeMat(1, 0)));
+
+    // Check Max bounds
+    assertFloatVal(ExtremeMat, 1, 1, 65504.0f);
+
+
+    // ---------------------------------------------------------
+    // Edge Case 2: Memory Wipe via Copy Assignment Operator
+    // We will force a float matrix holding Infinity/NaN to 
+    // absorb an integer matrix. It must perfectly strip its 
+    // float state, avoid heap fragmentation, and become an Int.
+    // ---------------------------------------------------------
+    TinyMatrix IntMat(2, 2, {1, 2, 3, 4});
+
+    // Trigger operator=
+    ExtremeMat = IntMat;
+
+    // Verify the float state was utterly destroyed and replaced
+    assert(ExtremeMat.IsFloat() == false);
+    assertIntVal(ExtremeMat, 0, 0, 1);
+    assertIntVal(ExtremeMat, 1, 1, 4);
+
+
+    // ---------------------------------------------------------
+    // Edge Case 3: Deep Copy Constructor Survival
+    // We will copy construct a float matrix and ensure the exact 
+    // 16-bit binary state survives the memory clone.
+    // ---------------------------------------------------------
+    TinyMatrix FloatSource(2, 2, {0.333, 0.666, inf, nan});
+    TinyMatrix DeepClone = FloatSource; // Triggers Copy Constructor
+
+    assert(DeepClone.IsFloat() == true);
+    assertFloatVal(DeepClone, 0, 0, 0.333f);
+    assert(std::isinf(DeepClone(1, 0)));
+    assert(std::isnan(DeepClone(1, 1)));
+
+    std::cout << " -> PASS" << std::endl;
+}
+
+int main() {
+    std::cout << "==========================================\n";
+    std::cout << "      TinyMatrix Test Suite Started       \n";
+    std::cout << "==========================================\n\n";
+
+    TestInitialization();
+    TestScalarMath();
+    TestMatrixMath();
+    TestDotProduct();
+    TestTypePromotion();
+    TestUnusualUses();
+    TestEdgeCases();
+
+    std::cout << "\n==========================================\n";
+    std::cout << "  ALL TESTS PASSED! TYPES ARE STRICT!     \n";
+    std::cout << "==========================================\n";
+
+    return 0;
 }
