@@ -141,7 +141,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="TinyMatrix.cpp" />
     <ClCompile Include="TinyMatrixDemo.cpp" />
   </ItemGroup>
   <ItemGroup>

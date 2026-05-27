@@ -1,3 +1,4 @@
+#define TINYMATRIX_IMPLEMENTATION
 #include "TinyMatrix.h"
 #include <iostream>
 #include <cassert>
@@ -347,7 +348,35 @@ void TestNeuralNetworkOps() {
 
     std::cout << " -> PASS" << std::endl;
 }
+void TestFixedPointQ88() {
+    std::cout << "Running TestFixedPointQ88 (Quantization & Integer ALU Math)..." << std::endl;
 
+    // 1. The Setup (Float Matrix)
+    TinyMatrix M(2, 2, {0.5, 1.0, -1.5, 2.25});
+
+    // 2. Quantize to Q8.8
+    M.QuantizeQ88();
+    assert(M.IsFloat() == false); // Must be an integer matrix now!
+    assertIntVal(M, 0, 0, 128);   // 0.5 * 256 = 128
+    assertIntVal(M, 0, 1, 256);   // 1.0 * 256 = 256
+    assertIntVal(M, 1, 0, -384);  // -1.5 * 256 = -384
+
+    // 3. Fixed-Point Math (Hadamard: 0.5 * 0.5 = 0.25)
+    TinyMatrix Half(2, 2, {0.5, 0.5, 0.5, 0.5});
+    Half.QuantizeQ88();
+
+    M.fixed_hadamard(Half); // Integer ALUs only!
+
+    assert(M.IsFloat() == false);
+    assertIntVal(M, 0, 0, 64); // Q8.8 representation of 0.25 (128 * 128 >> 8 = 64)
+
+    // 4. Dequantize back to Float
+    M.DequantizeQ88();
+    assert(M.IsFloat() == true);
+    assertFloatVal(M, 0, 0, 0.25f); // The math survived!
+
+    std::cout << " -> PASS" << std::endl;
+}
 int main() {
     std::cout << "==========================================\n";
     std::cout << "      TinyMatrix Test Suite Started       \n";
@@ -361,6 +390,7 @@ int main() {
     TestNeuralNetworkOps();
     TestUnusualUses();
     TestEdgeCases();
+    TestFixedPointQ88();
 
     std::cout << "\n==========================================\n";
     std::cout << "  ALL TESTS PASSED! TYPES ARE STRICT!     \n";
