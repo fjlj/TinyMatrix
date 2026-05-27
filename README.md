@@ -22,8 +22,17 @@ Key Features
 *   **IEEE-754 Bulletproof:** Custom bit-shifting translation layer safely traps and converts extreme floating-point states like 0.0f, Infinity, and Quiet NaNs without triggering undefined compiler behavior.
     
 *   **Zero Dependencies:** Pure C++. No external math libraries required.
-    
 
+## Integration
+
+TinyMatrix uses a single-header implementation pattern. To integrate the library into your project:
+
+1. Include `TinyMatrix.h` in your project.
+2. In **exactly one** `.cpp` file, define the implementation macro before including the header:
+```c++
+    #define TINYMATRIX_IMPLEMENTATION
+    #include "TinyMatrix.h"
+```
 Quick Start
 -----------
 
@@ -34,6 +43,7 @@ TinyMatrix uses a clean initialization syntax and intelligently handles type pro
 C++
 
 ```c++
+#define TINYMATRIX_IMPLEMENTATION
 #include "TinyMatrix.h"
 
 // Initialize with modern C++ initializer lists
