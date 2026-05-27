@@ -85,6 +85,9 @@ private:
     unsigned char* data;
     bool isFloat = false;
 
+    TinyMatrix* _scratch = nullptr;
+    TinyMatrix* _operandScratch = nullptr;
+
 public:
     int Rows() {
         return this->rows;
@@ -381,6 +384,7 @@ TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<int> nums) {
 
 void TinyMatrix::init(int r, int c) {
     if(this == nullptr) return;
+    delete[] this->data;                 // safe: all constructed objects own a valid buffer
     this->rows = r; this->cols = c;
     this->size = (makeEven((r * c)) * 2);
     this->data = new unsigned char[this->size] { 0 };
@@ -388,19 +392,38 @@ void TinyMatrix::init(int r, int c) {
 
 TinyMatrix::~TinyMatrix() {
     delete[] this->data;
+    delete _scratch;
+    delete _operandScratch;
 }
 
 TinyMatrix::TinyMatrix(const TinyMatrix& source) {
-    this->init(source.rows, source.cols);
+    this->rows = source.rows;
+    this->cols = source.cols;
+    this->size = source.size;
+    this->data = new unsigned char[this->size] { 0 };
     this->isFloat = source.isFloat;
     std::copy(source.data, source.data + source.size, this->data);
 }
 
 TinyMatrix& TinyMatrix::operator=(const TinyMatrix& source) {
     if(&source == this) return *this;
-    this->init(source.rows, source.cols);
+
+    if(source.rows == this->rows && source.cols == this->cols) {
+        // Same dimensions: reuse existing buffer (fast path, no allocation).
+        // Only copy the payload and type flag.
+        this->isFloat = source.isFloat;
+        std::copy(source.data, source.data + source.size, this->data);
+        return *this;
+    }
+
+    // Size change: clean up old memory, then allocate fresh buffer.
+    delete[] this->data;
+    this->rows = source.rows;
+    this->cols = source.cols;
+    this->size = source.size;
     this->isFloat = source.isFloat;
-    std::copy(source.data, (source.data + source.size), this->data);
+    this->data = new unsigned char[this->size] { 0 };
+    std::copy(source.data, source.data + source.size, this->data);
     return *this;
 }
 
@@ -725,6 +748,13 @@ TinyMatrix& TinyMatrix::Randomize(float min, float max) {
 }
 
 void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
+    if (_scratch == nullptr) {
+        _scratch = new TinyMatrix(1, 1);
+    }
+    if (_operandScratch == nullptr) {
+        _operandScratch = new TinyMatrix(1, 1);
+    }
+
     TinyMatrix* scratchNib = nullptr;
     TinyMatrix* o2_copy = nullptr;
     float val = 0;
@@ -735,13 +765,17 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
 
 
     if(mFuncs_t[n] & (NEEDS_COPY | NEEDS_OTHER)) {
-        if(mFuncs_t[n] & NEEDS_COPY)
-            scratchNib = new TinyMatrix(*this);
+        if(mFuncs_t[n] & NEEDS_COPY) {
+            // Load *this into scratch register (reuses buffer when possible)
+            *_scratch = *this;
+            scratchNib = _scratch;
+        }
         if(mFuncs_t[n] & NEEDS_OTHER && !(mFuncs_t[n] & NEEDS_COPY)) {
             assert(other != nullptr || o2_ret != nullptr);
             if(o2_ret != nullptr && other == nullptr)
                 other = (TinyMatrix*)o2_ret;
-            scratchNib = new TinyMatrix(*other);
+            *_scratch = *other;
+            scratchNib = _scratch;
             if(n == mapFuncs::DOT || n == mapFuncs::FIXED_DOT) {
                 if(scratchNib->rows != ((TinyMatrix*)o2_ret)->cols && scratchNib->cols == ((TinyMatrix*)o2_ret)->cols) {
                     //other matrix was provided but not transposed or DOT with self
@@ -758,15 +792,15 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
         assert(scratchNib != nullptr);
     }
     TinyMatrix* leftOperand = nullptr;
-    bool deleteLeftOperand = false;
 
     if(n == mapFuncs::DOT || n == mapFuncs::FIXED_DOT) {
         assert(o2_ret != nullptr);
         TinyMatrix* o2_matrix = (TinyMatrix*)o2_ret;
 
         if(this == o2_matrix) {
-            leftOperand = new TinyMatrix(*o2_matrix);
-            deleteLeftOperand = true;
+            // Alias case for dot with self: use operand scratch register
+            *_operandScratch = *o2_matrix;
+            leftOperand = _operandScratch;
         } else {
             leftOperand = o2_matrix;
         }
@@ -791,7 +825,6 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::DOT:
                     case mapFuncs::FIXED_DOT:
                         sum = 0;
-                        // EXACT FIX 2: Use leftOperand to read data safely
                         for(int a = 0; a < leftOperand->cols; a++) {
                             sum += foo((*scratchNib)(a, j), (*leftOperand)(i, a), 0, nullptr);
                         }
@@ -810,8 +843,10 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::FIXED_HADAMARD:
                         assert(o2_ret != nullptr);
                         if(o2_copy == nullptr && (mFuncs_t[n] & RESHAPE) || ((TinyMatrix*)o2_ret)->rows != scratchNib->rows && ((TinyMatrix*)o2_ret)->cols != scratchNib->cols) {
-                            o2_copy = new TinyMatrix(*(TinyMatrix*)o2_ret);
-                            o2_copy->Shape(scratchNib->rows, scratchNib->cols, true);
+                            // Need a reshaped copy of the other operand → use _operandScratch register
+                            *_operandScratch = *(TinyMatrix*)o2_ret;
+                            _operandScratch->Shape(scratchNib->rows, scratchNib->cols, true);
+                            o2_copy = _operandScratch;
                         } else if(o2_copy == nullptr) {
                             o2_copy = (TinyMatrix*)o2_ret;
                         }
@@ -850,8 +885,6 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::D_SIGMOID:
                     case mapFuncs::D_TANH:
                     case mapFuncs::FIXED_TANH:
-                        // These are unary. o2_ret is nullptr! 
-                        // We pass a dummy 0.0f instead of dereferencing a pointer.
                         if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
                             (*this)(i, j, foo(val, 0.0f, 0, nullptr));
                         } else {
@@ -873,12 +906,6 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
         }
     }
 
-    if(scratchNib != nullptr)
-        delete scratchNib;
-    if(o2_copy != nullptr && o2_copy != o2_ret)
-        delete o2_copy;
-    if(deleteLeftOperand)
-        delete leftOperand;
 }
 
 unsigned char* TinyMatrix::operator[](const int p) {
