@@ -396,5 +396,6 @@ int main() {
     std::cout << "  ALL TESTS PASSED! TYPES ARE STRICT!     \n";
     std::cout << "==========================================\n";
 
+    TinyMatrix::CleanupEngine();
     return 0;
 }

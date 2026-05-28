@@ -18,6 +18,7 @@
 #include <iostream>
 #include <cmath>
 #include <initializer_list>
+#include <cstring>   // for std::memcpy in _snapshotToRegister
 
 
 enum mapFuncs {
@@ -85,8 +86,10 @@ private:
     unsigned char* data;
     bool isFloat = false;
 
-    TinyMatrix* _scratch = nullptr;
-    TinyMatrix* _operandScratch = nullptr;
+    static thread_local TinyMatrix* _scratch;
+    static thread_local TinyMatrix* _operandScratch;
+    static thread_local size_t _scratchCapacity;
+    static thread_local size_t _operandScratchCapacity;
 
 public:
     int Rows() {
@@ -146,6 +149,12 @@ public:
     TinyMatrix& D_Tanh();
     static int16_t tanh_lut[1024];
     static void InitLUT();
+    static void CleanupEngine() {
+        delete _scratch;
+        _scratch = nullptr;
+        delete _operandScratch;
+        _operandScratch = nullptr;
+    }
     TinyMatrix& fixed_tanh();
     void print(std::string extra = "");
 
@@ -161,10 +170,19 @@ private:
     void map(int n, void* o2_ret = nullptr, TinyMatrix* other = nullptr);
     static HALF floatToHalf(mFloat i);
     static float halfToFloat(mHalf y);
+
+    // Helpers for cheap, capacity-aware snapshots into the persistent scratch registers.
+    void _ensureScratchCapacity(TinyMatrix*& reg, size_t& capacity, int rows, int cols);
+    void _snapshotToRegister(TinyMatrix*& dest, const TinyMatrix* src, size_t& cap);
+
 };
 #endif
 
 #ifdef TINYMATRIX_IMPLEMENTATION
+thread_local TinyMatrix* TinyMatrix::_scratch = nullptr;
+thread_local TinyMatrix* TinyMatrix::_operandScratch = nullptr;
+thread_local size_t TinyMatrix::_scratchCapacity = 0;
+thread_local size_t TinyMatrix::_operandScratchCapacity = 0;
 
 constexpr auto makeEven(int a) {
     return (a + 1 ^ (~a & 1));
@@ -392,8 +410,6 @@ void TinyMatrix::init(int r, int c) {
 
 TinyMatrix::~TinyMatrix() {
     delete[] this->data;
-    delete _scratch;
-    delete _operandScratch;
 }
 
 TinyMatrix::TinyMatrix(const TinyMatrix& source) {
@@ -750,9 +766,11 @@ TinyMatrix& TinyMatrix::Randomize(float min, float max) {
 void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
     if (_scratch == nullptr) {
         _scratch = new TinyMatrix(1, 1);
+        _scratchCapacity = _scratch->size;
     }
     if (_operandScratch == nullptr) {
         _operandScratch = new TinyMatrix(1, 1);
+        _operandScratchCapacity = _operandScratch->size;
     }
 
     TinyMatrix* scratchNib = nullptr;
@@ -760,22 +778,46 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
     float val = 0;
     float sum = 0;
 
+    // Captured intended isFloat for the three scratch/"operand" buffers
+    // at the exact moment they were snapshotted or aliased. These are the
+    // only reliable values to pass to fastGet when reading those buffers.
+    bool scratch_snapshot_is_float = false;
+    bool other_snapshot_is_float   = false;
+    bool left_snapshot_is_float    = false;
+
     float(*foo)(float, float, int, TinyMatrix*);
     foo = (float(*)(float, float, int, TinyMatrix*))mFuncs[n];
+
+    // Fast direct buffer access helpers — defined early so they are available everywhere in map()
+    auto fastGet = [](unsigned char* base, int cols, bool isF, int r, int c) -> float {
+        int pos = (r * cols + c) * 2;
+        return isF ? halfToFloat(*(uint16_t*)(base + pos))
+                   : (float)*(int16_t*)(base + pos);
+    };
+
+    auto fastSet = [](unsigned char* base, int cols, bool isF, int r, int c, float v) {
+        int pos = (r * cols + c) * 2;
+        if (isF) {
+            *(uint16_t*)(base + pos) = floatToHalf(v);
+        } else {
+            *(int16_t*)(base + pos) = (int16_t)v;
+        }
+    };
 
 
     if(mFuncs_t[n] & (NEEDS_COPY | NEEDS_OTHER)) {
         if(mFuncs_t[n] & NEEDS_COPY) {
-            // Load *this into scratch register (reuses buffer when possible)
-            *_scratch = *this;
+            _snapshotToRegister(_scratch, this, _scratchCapacity);
             scratchNib = _scratch;
+            scratch_snapshot_is_float = this->isFloat;
         }
         if(mFuncs_t[n] & NEEDS_OTHER && !(mFuncs_t[n] & NEEDS_COPY)) {
             assert(other != nullptr || o2_ret != nullptr);
             if(o2_ret != nullptr && other == nullptr)
                 other = (TinyMatrix*)o2_ret;
-            *_scratch = *other;
+            _snapshotToRegister(_scratch, other, _scratchCapacity);
             scratchNib = _scratch;
+            scratch_snapshot_is_float = other->isFloat;
             if(n == mapFuncs::DOT || n == mapFuncs::FIXED_DOT) {
                 if(scratchNib->rows != ((TinyMatrix*)o2_ret)->cols && scratchNib->cols == ((TinyMatrix*)o2_ret)->cols) {
                     //other matrix was provided but not transposed or DOT with self
@@ -798,11 +840,12 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
         TinyMatrix* o2_matrix = (TinyMatrix*)o2_ret;
 
         if(this == o2_matrix) {
-            // Alias case for dot with self: use operand scratch register
-            *_operandScratch = *o2_matrix;
+            _snapshotToRegister(_operandScratch, o2_matrix, _operandScratchCapacity);
             leftOperand = _operandScratch;
+            left_snapshot_is_float = o2_matrix->isFloat;
         } else {
             leftOperand = o2_matrix;
+            left_snapshot_is_float = o2_matrix->isFloat;
         }
 
         if(this->cols != scratchNib->cols || this->rows != leftOperand->rows) {
@@ -813,11 +856,39 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
             this->isFloat = true;
         }
     }
+
+    // Decide once (before the hot loop) whether we need a reshaped copy of the "other" operand.
+    // This logic was previously re-evaluated on every element for binary matrix ops.
+    // Guarded strictly to only the opcodes that use o2_copy / fromMatrix.
+    if (n == mapFuncs::ADD || n == mapFuncs::SUB || n == mapFuncs::SUBR ||
+        n == mapFuncs::ADDR || n == mapFuncs::HADAMARD || n == mapFuncs::FIXED_HADAMARD) {
+
+        if (scratchNib != nullptr) {
+            assert(o2_ret != nullptr);
+
+            bool need_reshaped_o2 = (o2_copy == nullptr) &&
+                ((mFuncs_t[n] & RESHAPE) ||
+                 (((TinyMatrix*)o2_ret)->rows != scratchNib->rows ||
+                  ((TinyMatrix*)o2_ret)->cols != scratchNib->cols));
+
+            if (need_reshaped_o2) {
+                _snapshotToRegister(_operandScratch, (TinyMatrix*)o2_ret, _operandScratchCapacity);
+                _operandScratch->Shape(scratchNib->rows, scratchNib->cols, true);
+                o2_copy = _operandScratch;
+                other_snapshot_is_float = ((TinyMatrix*)o2_ret)->isFloat;
+            } else if (o2_copy == nullptr) {
+                o2_copy = (TinyMatrix*)o2_ret;
+                other_snapshot_is_float = ((TinyMatrix*)o2_ret)->isFloat;
+            }
+            assert(o2_copy->rows == scratchNib->rows && o2_copy->cols == scratchNib->cols);
+        }
+    }
+
     for(int i = 0; i < this->rows; i++) {
         for(int j = 0; j < this->cols; j++) {
             if(mFuncs_t[n] & NEEDS_VAL) {
                 if(mFuncs_t[n] & AS_FLOAT) this->isFloat = false;
-                val = (*this)(i, j);
+                val = fastGet(this->data, this->cols, this->isFloat, i, j);
             }
             if(mFuncs_t[n] & NOT_VOID) {
                 if(scratchNib != nullptr) {
@@ -825,14 +896,17 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::DOT:
                     case mapFuncs::FIXED_DOT:
                         sum = 0;
+                        // Fast direct access using captured snapshot isFloat (avoids fragile object state)
                         for(int a = 0; a < leftOperand->cols; a++) {
-                            sum += foo((*scratchNib)(a, j), (*leftOperand)(i, a), 0, nullptr);
+                            float sVal = fastGet(scratchNib->data, scratchNib->cols, scratch_snapshot_is_float, a, j);
+                            float lVal = fastGet(leftOperand->data, leftOperand->cols, left_snapshot_is_float, i, a);
+                            sum += foo(sVal, lVal, 0, nullptr);
                         }
 
                         if(this->isFloat) {
-                            (*this)(i, j, sum);
+                            fastSet(this->data, this->cols, this->isFloat, i, j, sum);
                         } else {
-                            (*this)(i, j, (int16_t)sum);
+                            fastSet(this->data, this->cols, false, i, j, sum);
                         }
                         break;
                     case mapFuncs::SUB:
@@ -841,25 +915,36 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::ADDR:
                     case mapFuncs::HADAMARD:
                     case mapFuncs::FIXED_HADAMARD:
-                        assert(o2_ret != nullptr);
-                        if(o2_copy == nullptr && (mFuncs_t[n] & RESHAPE) || ((TinyMatrix*)o2_ret)->rows != scratchNib->rows && ((TinyMatrix*)o2_ret)->cols != scratchNib->cols) {
-                            // Need a reshaped copy of the other operand → use _operandScratch register
-                            *_operandScratch = *(TinyMatrix*)o2_ret;
-                            _operandScratch->Shape(scratchNib->rows, scratchNib->cols, true);
-                            o2_copy = _operandScratch;
-                        } else if(o2_copy == nullptr) {
-                            o2_copy = (TinyMatrix*)o2_ret;
-                        }
-                        assert(o2_copy->rows == scratchNib->rows && o2_copy->cols == scratchNib->cols);
+                        // o2_copy decision hoisted before the loop (see above)
+                        assert(o2_copy && o2_copy->rows == scratchNib->rows && o2_copy->cols == scratchNib->cols);
                     default:
                         TinyMatrix* fromMatrix = (o2_copy != nullptr ? o2_copy : scratchNib);
                         if((mFuncs_t[n] & NEEDS_COPY) && (mFuncs_t[n] & NEEDS_OTHER))
-                            val = (*fromMatrix)(i, j);
-                        if(this->isFloat || fromMatrix->isFloat && n != mapFuncs::INTS) {
-                            (*this)(i, j, foo(val, (float)i, j, scratchNib));
+                            val = fastGet(fromMatrix->data, fromMatrix->cols, other_snapshot_is_float, i, j);
+
+                        // Fast direct access using captured snapshot isFloat for the "this" side
+                        float this_val = fastGet(scratchNib->data, scratchNib->cols, scratch_snapshot_is_float, i, j);
+
+                        float result;
+                        if (n == mapFuncs::ADD || n == mapFuncs::ADDR) {
+                            result = val + this_val;
+                        } else if (n == mapFuncs::SUB) {
+                            result = this_val - val;
+                        } else if (n == mapFuncs::SUBR) {
+                            result = val - this_val;
+                        } else if (n == mapFuncs::HADAMARD) {
+                            result = val * this_val;
+                        } else if (n == mapFuncs::FIXED_HADAMARD) {
+                            result = foo(val, (float)i, j, scratchNib);  // keep fixed-point integer math
                         } else {
-                            (*this)(i, j, (int16_t)foo(val, (float)i, j, scratchNib));
+                            result = foo(val, (float)i, j, scratchNib);
                         }
+
+                        bool write_as_float = this->isFloat || fromMatrix->isFloat && n != mapFuncs::INTS;
+                        if (write_as_float) {
+                            this->isFloat = true;
+                        }
+                        fastSet(this->data, this->cols, this->isFloat, i, j, result);
                         break;
                     }
                 } else {
@@ -870,10 +955,14 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::MULS:
                     case mapFuncs::MULFS:
                         if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
-                            // Reads the scalar value from o2_ret safely
-                            (*this)(i, j, foo(val, *(float*)o2_ret, 0, nullptr));
+                            if (mFuncs_t[n] & AS_FLOAT) {
+                                this->isFloat = true;
+                            }
+                            float r = foo(val, *(float*)o2_ret, 0, nullptr);
+                            fastSet(this->data, this->cols, this->isFloat, i, j, r);
                         } else {
-                            (*this)(i, j, (int16_t)foo(val, (int16_t)(*(float*)o2_ret), 0, nullptr));
+                            float r = foo(val, (int16_t)(*(float*)o2_ret), 0, nullptr);
+                            fastSet(this->data, this->cols, false, i, j, r);
                         }
                         break;
 
@@ -886,9 +975,11 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
                     case mapFuncs::D_TANH:
                     case mapFuncs::FIXED_TANH:
                         if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
-                            (*this)(i, j, foo(val, 0.0f, 0, nullptr));
+                            float r = foo(val, 0.0f, 0, nullptr);
+                            fastSet(this->data, this->cols, this->isFloat, i, j, r);
                         } else {
-                            (*this)(i, j, (int16_t)foo(val, 0.0f, 0, nullptr));
+                            float r = foo(val, 0.0f, 0, nullptr);
+                            fastSet(this->data, this->cols, false, i, j, r);
                         }
                         break;
 
@@ -911,6 +1002,36 @@ void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
 unsigned char* TinyMatrix::operator[](const int p) {
     //return &this->data[(p)];
     return &this->data[(p * 2)];
+}
+
+// =====================================================================
+// Capacity-aware scratch register helpers (allocation savings)
+// =====================================================================
+
+void TinyMatrix::_ensureScratchCapacity(TinyMatrix*& reg, size_t& capacity, int rows, int cols) {
+    size_t needed = size_t(makeEven(rows * cols)) * 2;
+
+    if (reg == nullptr || needed > capacity) {
+        delete reg;
+        reg = new TinyMatrix(rows, cols);
+        capacity = reg->size;
+    } else {
+        // Buffer is big enough — just update logical dimensions, no allocation
+        reg->rows = rows;
+        reg->cols = cols;
+        reg->size = (int)needed;
+    }
+}
+
+void TinyMatrix::_snapshotToRegister(TinyMatrix*& dest, const TinyMatrix* src, size_t& cap) {
+    if (!src) return;
+
+    _ensureScratchCapacity(dest, cap, src->rows, src->cols);
+
+    if (dest && src && dest->data && src->data && dest->size >= src->size) {
+        std::memcpy(dest->data, src->data, src->size);
+        dest->isFloat = src->isFloat;
+    }
 }
 
 #endif
