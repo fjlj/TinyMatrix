@@ -21,7 +21,6 @@
 #include <cstring> 
 #include <immintrin.h>
 
-
 typedef uint16_t HALF;
 
 struct mHalf {
@@ -76,7 +75,9 @@ class TinyMatrix {
 private:
     int rows;
     int cols;
-    int size;
+    int size;       // Logical bytes (for backward compatibility)
+    int stride;     // Physical columns in RAM
+    int cap_rows;   // Physical rows in RAM
     unsigned char* data;
     bool isFloat = false;
 
@@ -89,19 +90,26 @@ private:
     static thread_local int32_t* _accumScratchInt;
     static thread_local size_t _accumIntCapacity;
     static thread_local TinyMatrix* _transposeScratch;
-    static thread_local size_t _transposeScratchCapacity; 
+    static thread_local size_t _transposeScratchCapacity;
 
 public:
+
+    void Reserve(int max_r, int max_c);
+    void SetLogicalBounds(int new_rows, int new_cols);
+    void ShrinkToFit();
+
     void WriteRaw(std::ostream& out) {
+        ShrinkToFit(); // Guarantee tightly packed memory before writing to disk
         out.write((char*)&this->isFloat, sizeof(bool));
         out.write((char*)this->data, this->size);
     }
 
-    // Overwrites the raw memory block with bit-perfect accuracy
     void ReadRaw(std::istream& in) {
+        ShrinkToFit(); // Ensure we are writing into a perfectly sized matrix
         in.read((char*)&this->isFloat, sizeof(bool));
         in.read((char*)this->data, this->size);
     }
+
     int Rows() {
         return this->rows;
     }
@@ -117,8 +125,6 @@ public:
 
     TinyMatrix();
     TinyMatrix(int r, int c);
-
-    // Modern initializer lists replace the old unsafe variadics
     TinyMatrix(int r, int c, std::initializer_list<double> nums);
     TinyMatrix(int r, int c, std::initializer_list<int> nums);
 
@@ -157,6 +163,7 @@ public:
     TinyMatrix& fixed_hadamard(const TinyMatrix& a);
     TinyMatrix& Tanh();
     TinyMatrix& D_Tanh();
+
     static int16_t tanh_lut[1024];
     static void InitLUT();
     static void CleanupEngine() {
@@ -164,13 +171,14 @@ public:
         _scratch = nullptr;
         delete _operandScratch;
         _operandScratch = nullptr;
-        delete[] _accumScratch;      // Added
-        _accumScratch = nullptr;     // Added
-        delete[] _accumScratchInt;   // Added
-        _accumScratchInt = nullptr;  // Added
+        delete[] _accumScratch;
+        _accumScratch = nullptr;
+        delete[] _accumScratchInt;
+        _accumScratchInt = nullptr;
         delete _transposeScratch;
         _transposeScratch = nullptr;
     }
+
     TinyMatrix& fixed_tanh();
     void print(std::string extra = "");
 
@@ -181,16 +189,49 @@ public:
     TinyMatrix& Floats();
     TinyMatrix& Randomize(float min = -1.0f, float max = 1.0f);
     nRet sum();
+    // Move Constructor
+
+    TinyMatrix(TinyMatrix&& source) noexcept {
+        this->rows = source.rows;
+        this->cols = source.cols;
+        this->stride = source.stride;
+        this->cap_rows = source.cap_rows;
+        this->size = source.size;
+        this->data = source.data;
+        this->isFloat = source.isFloat;
+
+        source.data = nullptr;
+    }
+
+    // Move Assignment
+    TinyMatrix& operator=(TinyMatrix&& source) noexcept {
+        if(&source == this) return *this;
+
+        delete[] this->data; // Free existing memory
+
+        this->rows = source.rows;
+        this->cols = source.cols;
+        this->stride = source.stride;
+        this->cap_rows = source.cap_rows;
+        this->size = source.size;
+        this->data = source.data;
+        this->isFloat = source.isFloat;
+
+        source.data = nullptr;
+        return *this;
+    }
+
     template <typename Func>
     TinyMatrix& mapInline(Func operation, bool forceFloat = false) {
         bool origFloat = this->isFloat;
         bool targetFloat = origFloat || forceFloat;
         this->isFloat = targetFloat;
 
-        int pos = 0; // Track sequentially
         for(int i = 0; i < this->rows; i++) {
-            for(int j = 0; j < this->cols; j++) {
+            // Jump to the physical start of the row
+            int pos = (i * this->stride) * 2;
 
+            for(int j = 0; j < this->cols; j++) {
                 float val = origFloat ? halfToFloat(*(uint16_t*)(this->data + pos))
                     : (float)*(int16_t*)(this->data + pos);
 
@@ -201,16 +242,14 @@ public:
                 } else {
                     *(int16_t*)(this->data + pos) = (int16_t)result;
                 }
-                pos += 2; // Move forward exactly one 16-bit block
+                pos += 2;
             }
         }
         return *this;
     }
 
-    // For Matrix-to-Matrix element-wise operations
     template <typename Func>
     TinyMatrix& mapInline(TinyMatrix& other, Func operation, bool forceFloat = false) {
-        // Halt immediately if shapes don't match and aren't broadcastable
         assert(((this->rows == other.rows && this->cols == other.cols) ||
             (other.rows == 1 && other.cols == this->cols) ||
             (other.cols == 1 && other.rows == this->rows) ||
@@ -222,21 +261,17 @@ public:
         bool targetFloat = origFloat || otherFloat || forceFloat;
         this->isFloat = targetFloat;
 
-        int pos = 0;
-        int other_pos = 0;
-
         bool same_shape = (this->rows == other.rows && this->cols == other.cols);
 
         for(int i = 0; i < this->rows; i++) {
-            // Lock row index to 0 if we are broadcasting a 1xN row vector
             int other_i = (other.rows == 1) ? 0 : i;
 
-            for(int j = 0; j < this->cols; j++) {
+            int pos = (i * this->stride) * 2;
+            int other_pos = (other_i * other.stride) * 2;
 
-                // Recalculate other_pos ONLY if we are actively broadcasting
-                if(!same_shape) {
-                    int other_j = (other.cols == 1) ? 0 : j;
-                    other_pos = (other_i * other.cols + other_j) * 2;
+            for(int j = 0; j < this->cols; j++) {
+                if(!same_shape && other.cols == 1) {
+                    other_pos = (other_i * other.stride + 0) * 2;
                 }
 
                 float val1 = origFloat ? halfToFloat(*(uint16_t*)(this->data + pos))
@@ -254,22 +289,17 @@ public:
                 }
 
                 pos += 2;
-                if(same_shape) {
-                    other_pos += 2; // Fast path for matching matrices
+                if(same_shape || other.cols != 1) {
+                    other_pos += 2;
                 }
             }
         }
         return *this;
     }
 private:
-    unsigned char* operator[](const int p);
     static HALF floatToHalf(mFloat i);
     static float halfToFloat(mHalf y);
-
-    // Helpers for cheap, capacity-aware snapshots into the persistent scratch registers.
-    void _ensureScratchCapacity(TinyMatrix*& reg, size_t& capacity, int rows, int cols);
     void _snapshotToRegister(TinyMatrix*& dest, const TinyMatrix* src, size_t& cap);
-
 };
 #endif
 
@@ -289,32 +319,109 @@ constexpr auto makeEven(int a) {
     return (a + 1 ^ (~a & 1));
 }
 
-// Allocate the 2KB of RAM for the Lookup Table
 int16_t TinyMatrix::tanh_lut[1024];
 
-// Run this ONCE at boot to pre-calculate the Q8.8 Tanh curve
 void TinyMatrix::InitLUT() {
     for(int i = 0; i < 1024; i++) {
-        // Convert Q8.8 integer index to true float, run FPU Tanh, and convert back!
         float float_val = (float)i / 256.0f;
         float t_val = std::tanh(float_val);
         tanh_lut[i] = (int16_t)(t_val * 256.0f);
     }
 }
 
+// =====================================================================
+// CAPACITY & STRIDE MANAGEMENT
+// =====================================================================
+
+void TinyMatrix::Reserve(int max_r, int max_c) {
+    if(max_r <= cap_rows && max_c <= stride) return;
+
+    int new_cap_rows = std::max(cap_rows, max_r);
+    int new_stride = std::max(stride, max_c);
+    int physical_size = makeEven(new_cap_rows * new_stride) * 2;
+
+    unsigned char* new_data = new unsigned char[physical_size]();
+
+    if(data) {
+        for(int r = 0; r < rows; r++) {
+            for(int c = 0; c < cols; c++) {
+                int old_pos = (r * stride + c) * 2;
+                int new_pos = (r * new_stride + c) * 2;
+                new_data[new_pos] = data[old_pos];
+                new_data[new_pos + 1] = data[old_pos + 1];
+            }
+        }
+        delete[] data;
+    }
+
+    data = new_data;
+    cap_rows = new_cap_rows;
+    stride = new_stride;
+}
+
+void TinyMatrix::SetLogicalBounds(int new_rows, int new_cols) {
+    // 1. Auto-Reserve Safety Net: If they ask for more than physical RAM, allocate it safely!
+    if(new_rows > cap_rows || new_cols > stride) {
+        Reserve(std::max(cap_rows, new_rows), std::max(stride, new_cols));
+    }
+
+    // 2. Fast memory zeroing of ONLY the newly exposed area (Safely ignores shrinking)
+    for(int r = 0; r < new_rows; r++) {
+        for(int c = 0; c < new_cols; c++) {
+            if(r >= rows || c >= cols) {
+                int pos = (r * stride + c) * 2;
+                data[pos] = 0;
+                data[pos + 1] = 0;
+            }
+        }
+    }
+
+    // 3. Update the boundaries (This must ALWAYS run, even when shrinking!)
+    rows = new_rows;
+    cols = new_cols;
+    this->size = makeEven(rows * cols) * 2; // Maintain legacy tracking size
+}
+
+void TinyMatrix::ShrinkToFit() {
+    if(rows == cap_rows && cols == stride) return;
+
+    int tight_size = makeEven(rows * cols) * 2;
+    unsigned char* tight_data = new unsigned char[tight_size]();
+
+    for(int r = 0; r < rows; r++) {
+        for(int c = 0; c < cols; c++) {
+            int old_pos = (r * stride + c) * 2;
+            int new_pos = (r * cols + c) * 2;
+            tight_data[new_pos] = data[old_pos];
+            tight_data[new_pos + 1] = data[old_pos + 1];
+        }
+    }
+
+    delete[] data;
+    data = tight_data;
+    cap_rows = rows;
+    stride = cols;
+    this->size = tight_size;
+}
+
+// =====================================================================
+
 TinyMatrix::TinyMatrix() {
     this->rows = 1; this->cols = 1; this->size = 4;
+    this->stride = 1; this->cap_rows = 1;
     this->data = new unsigned char[this->size]();
 }
 
 TinyMatrix::TinyMatrix(int r, int c) {
     this->rows = r; this->cols = c;
+    this->stride = c; this->cap_rows = r;
     this->size = (makeEven((r * c)) * 2);
     this->data = new unsigned char[this->size]();
 }
 
 TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<double> nums) {
     this->rows = r; this->cols = c;
+    this->stride = c; this->cap_rows = r;
     this->size = (makeEven((r * c)) * 2);
     this->data = new unsigned char[this->size]();
     this->isFloat = true;
@@ -322,13 +429,14 @@ TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<double> nums) {
     int i = 0;
     for(double val : nums) {
         if(i >= (this->size / 2)) break;
-        *(uint16_t*)(*this)[i] = floatToHalf((float)val);
+        *(uint16_t*)(data + i * 2) = floatToHalf((float)val);
         i++;
     }
 }
 
 TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<int> nums) {
     this->rows = r; this->cols = c;
+    this->stride = c; this->cap_rows = r;
     this->size = (makeEven((r * c)) * 2);
     this->data = new unsigned char[this->size]();
     this->isFloat = false;
@@ -336,15 +444,16 @@ TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<int> nums) {
     int i = 0;
     for(int val : nums) {
         if(i >= (this->size / 2)) break;
-        *(int16_t*)(*this)[i] = (int16_t)val;
+        *(int16_t*)(data + i * 2) = (int16_t)val;
         i++;
     }
 }
 
 void TinyMatrix::init(int r, int c) {
     if(this == nullptr) return;
-    delete[] this->data;                 // safe: all constructed objects own a valid buffer
+    delete[] this->data;
     this->rows = r; this->cols = c;
+    this->stride = c; this->cap_rows = r;
     this->size = (makeEven((r * c)) * 2);
     this->data = new unsigned char[this->size]();
 }
@@ -356,80 +465,98 @@ TinyMatrix::~TinyMatrix() {
 TinyMatrix::TinyMatrix(const TinyMatrix& source) {
     this->rows = source.rows;
     this->cols = source.cols;
+    this->stride = source.cols;
+    this->cap_rows = source.rows;
     this->size = source.size;
     this->data = new unsigned char[this->size]();
     this->isFloat = source.isFloat;
-    std::copy(source.data, source.data + source.size, this->data);
+
+    for(int i = 0; i < this->rows; i++) {
+        for(int j = 0; j < this->cols; j++) {
+            int s_pos = (i * source.stride + j) * 2;
+            int d_pos = (i * this->stride + j) * 2;
+            this->data[d_pos] = source.data[s_pos];
+            this->data[d_pos + 1] = source.data[s_pos + 1];
+        }
+    }
 }
 
 TinyMatrix& TinyMatrix::operator=(const TinyMatrix& source) {
     if(&source == this) return *this;
-
-    if(source.rows == this->rows && source.cols == this->cols) {
-        // Same dimensions: reuse existing buffer (fast path, no allocation).
-        // Only copy the payload and type flag.
-        this->isFloat = source.isFloat;
-        std::copy(source.data, source.data + source.size, this->data);
-        return *this;
-    }
-
-    // Size change: clean up old memory, then allocate fresh buffer.
-    delete[] this->data;
-    this->rows = source.rows;
-    this->cols = source.cols;
-    this->size = source.size;
+    this->Shape(source.rows, source.cols, true);
     this->isFloat = source.isFloat;
-    this->data = new unsigned char[this->size]();
-    std::copy(source.data, source.data + source.size, this->data);
+
+    for(int i = 0; i < this->rows; i++) {
+        for(int j = 0; j < this->cols; j++) {
+            int s_pos = (i * source.stride + j) * 2;
+            int d_pos = (i * this->stride + j) * 2;
+            this->data[d_pos] = source.data[s_pos];
+            this->data[d_pos + 1] = source.data[s_pos + 1];
+        }
+    }
     return *this;
 }
 
 float TinyMatrix::operator()(int r, int c) {
     assert(r >= 0 && r < this->rows && c >= 0 && c < this->cols && "Matrix Read Out of Bounds!");
-    int pos = (r * (this->cols) + c);
-    return (this->isFloat ? halfToFloat((uint16_t) * (uint16_t*)((*this)[pos])) : (float)*(int16_t*)((*this)[pos]));
+    int pos = (r * this->stride + c) * 2;
+    return (this->isFloat ? halfToFloat(*(uint16_t*)(this->data + pos)) : (float)*(int16_t*)(this->data + pos));
 }
 
 TinyMatrix& TinyMatrix::Shape(int r, int c, bool absolute) {
     if(this->rows == r && this->cols == c) return *this;
 
-    int old_r = this->rows;
-    int old_c = this->cols;
-    int old_size = this->size;
+    // Mode 1: The "Absolute" structural reshape
+    if(absolute) {
+        ShrinkToFit();
+        int tight_size = makeEven(r * c) * 2;
+        unsigned char* new_data = new unsigned char[tight_size]();
 
-    this->rows = r;
-    this->cols = c;
-    unsigned char* old_data = &this->data[0];
-    this->size = (makeEven((r * c)) * 2);
-
-    // FIX: Fast-path to prevent unnecessary reallocation (and register capacity destruction)
-    if(!absolute && old_size == this->size) {
+        for(int i = 0; i < std::min(rows, r); i++) {
+            for(int j = 0; j < std::min(cols, c); j++) {
+                int old_pos = (i * stride + j) * 2;
+                int new_pos = (i * c + j) * 2;
+                new_data[new_pos] = data[old_pos];
+                new_data[new_pos + 1] = data[old_pos + 1];
+            }
+        }
+        delete[] data;
+        data = new_data;
+        rows = r; cols = c;
+        cap_rows = r; stride = c;
+        this->size = tight_size;
         return *this;
     }
 
-    bool olim = (old_size <= this->size);
-    if(absolute) {
-        this->data = new unsigned char[this->size]();
-        for(int rt = 0; rt < (olim ? old_r : this->rows); rt++) {
-            for(int ct = 0; ct < (olim ? old_c : this->cols); ct++) {
-                int np = ((rt * this->cols) + ct) * 2;
-                int op = ((rt * old_c) + ct) * 2;
-
-                if(np < this->size - 1 && op < old_size - 1) {
-                    this->data[np] = old_data[op];
-                    this->data[np + 1] = old_data[op + 1];
-                } else if(np < this->size - 1) {
-                    this->data[np] = 0;
-                    this->data[np + 1] = 0;
-                }
-            }
-        }
-        delete[] old_data;
-    } else {
-        this->data = new unsigned char[this->size]();
-        std::copy(old_data, old_data + (old_size < this->size ? old_size : this->size), this->data);
-        delete[] old_data;
+    // Mode 2: 1D Flattening / Exact Volume Reshape
+    // Fixes TestUnusualUses! If the total element count is identical,
+    // tightly pack the memory to remove 2D stride gaps, then adjust bounds.
+    if(r * c == this->rows * this->cols) {
+        ShrinkToFit();
+        this->rows = r; this->cols = c;
+        this->cap_rows = r; this->stride = c;
+        this->size = makeEven(r * c) * 2;
+        return *this;
     }
+
+    // Mode 3: Fast In-Place Capacity Expansion
+    // Used by SnakeBrain. Expands logic boundaries without allocating memory.
+    if(r <= cap_rows && c <= stride) {
+        SetLogicalBounds(r, c);
+        return *this;
+    }
+
+    // Mode 4: Legacy 1D Allocation & Copy
+    // Fallback for weird structural wraps to maintain 100% backward compatibility
+    ShrinkToFit();
+    int tight_size = makeEven(r * c) * 2;
+    unsigned char* new_data = new unsigned char[tight_size]();
+    std::copy(data, data + std::min(this->size, tight_size), new_data);
+    delete[] data;
+    data = new_data;
+    rows = r; cols = c;
+    cap_rows = r; stride = c;
+    this->size = tight_size;
     return *this;
 }
 
@@ -438,15 +565,15 @@ void TinyMatrix::operator()(int r, int c, const int v) {
     if(this->isFloat) {
         (*this)(r, c, (float)v); return;
     }
-    int pos = (r * (this->cols) + c);
-    *(int16_t*)(*this)[pos] = (int16_t)v;
+    int pos = (r * this->stride + c) * 2;
+    *(int16_t*)(this->data + pos) = (int16_t)v;
 }
 
 void TinyMatrix::operator()(int r, int c, const float v) {
     assert(r >= 0 && r < this->rows && c >= 0 && c < this->cols && "Matrix Float Write Out of Bounds!");
     this->isFloat = true;
-    int pos = (r * (this->cols) + c);
-    *(uint16_t*)(*this)[pos] = floatToHalf(v);
+    int pos = (r * this->stride + c) * 2;
+    *(uint16_t*)(this->data + pos) = floatToHalf(v);
 }
 
 void TinyMatrix::operator()(int r, int c, const double v) {
@@ -471,9 +598,7 @@ TinyMatrix& TinyMatrix::Ints() {
     for(int i = 0; i < this->Rows(); i++) {
         for(int j = 0; j < this->Cols(); j++) {
             float val = (*this)(i, j);
-            int pos = (i * this->Cols() + j) * 2;
-
-            // Force the 16-bit integer cast directly into memory
+            int pos = (i * this->stride + j) * 2;
             *(int16_t*)(this->data + pos) = (int16_t)val;
         }
     }
@@ -496,7 +621,6 @@ TinyMatrix& TinyMatrix::multiply(float s) {
     return this->mapInline([s](float val, int r, int c) { return val * s; }, promote);
 }
 
-// Ensure the int/double overrides just forward to the float templates
 TinyMatrix& TinyMatrix::add(int s) {
     return this->add((float)s);
 }
@@ -532,7 +656,6 @@ TinyMatrix& TinyMatrix::hadamard(const TinyMatrix& a) {
 
 TinyMatrix& TinyMatrix::fixed_hadamard(const TinyMatrix& a) {
     return this->mapInline((TinyMatrix&)a, [](float v1, float v2, int r, int c) {
-        // Q8.8 Fixed-Point math baked directly into the lambda
         int32_t x = (int16_t)v1;
         int32_t y = (int16_t)v2;
         return (float)(int16_t)((x * y) >> 8);
@@ -542,23 +665,18 @@ TinyMatrix& TinyMatrix::fixed_hadamard(const TinyMatrix& a) {
 TinyMatrix& TinyMatrix::Relu() {
     return this->mapInline([](float val, int r, int c) { return val > 0.0001f ? val : 0.0f; }, true);
 }
-
 TinyMatrix& TinyMatrix::D_Relu() {
     return this->mapInline([](float val, int r, int c) { return val > 0.0001f ? 1.0f : 0.0f; }, true);
 }
-
 TinyMatrix& TinyMatrix::Sigmoid() {
     return this->mapInline([](float val, int r, int c) { return 1.0f / (1.0f + std::exp(-val)); }, true);
 }
-
 TinyMatrix& TinyMatrix::D_Sigmoid() {
     return this->mapInline([](float val, int r, int c) { return val * (1.0f - val); }, true);
 }
-
 TinyMatrix& TinyMatrix::Tanh() {
     return this->mapInline([](float val, int r, int c) { return std::tanh(val); }, true);
 }
-
 TinyMatrix& TinyMatrix::D_Tanh() {
     return this->mapInline([](float val, int r, int c) { return 1.0f - (val * val); }, true);
 }
@@ -577,12 +695,10 @@ TinyMatrix& TinyMatrix::fixed_tanh() {
 }
 
 TinyMatrix& TinyMatrix::dot(TinyMatrix& a, TinyMatrix& b) {
-    // 1. Snapshot logic to prevent memory aliasing (Protects A.dot(A, B) scenarios)
     _snapshotToRegister(_scratch, &a, _scratchCapacity);
     TinyMatrix* left = _scratch;
     TinyMatrix* right = &b;
 
-    // If the right operand is THIS matrix, snapshot it before we overwrite it
     if(right == this) {
         _snapshotToRegister(_operandScratch, right, _operandScratchCapacity);
         right = _operandScratch;
@@ -594,7 +710,6 @@ TinyMatrix& TinyMatrix::dot(TinyMatrix& a, TinyMatrix& b) {
 
     this->Shape(outRows, outCols);
 
-    // 2. Strict Type Promotion Logic restored
     bool leftFloat = left->IsFloat();
     bool rightFloat = right->IsFloat();
     this->isFloat = leftFloat || rightFloat;
@@ -606,52 +721,49 @@ TinyMatrix& TinyMatrix::dot(TinyMatrix& a, TinyMatrix& b) {
         _accumCapacity = neededAccum;
     }
 
-    // Fast memory zeroing instead of allocation
     std::memset(_accumScratch, 0, neededAccum * sizeof(float));
     float* accum = _accumScratch;
 
     unsigned char* left_data = left->data;
     unsigned char* right_data = right->data;
-    int left_cols = left->Cols();
-    int right_cols = right->Cols();
+    int l_stride = left->stride;
+    int r_stride = right->stride;
 
     for(int i = 0; i < outRows; i++) {
         for(int k = 0; k < innerDim; k++) {
-
-            // Read and convert the left value EXACTLY ONCE per k-loop
-            int left_pos = (i * left_cols + k) * 2;
+            int left_pos = (i * l_stride + k) * 2;
             float left_val = leftFloat ? halfToFloat(*(uint16_t*)(left_data + left_pos))
                 : (float)*(int16_t*)(left_data + left_pos);
 
             for(int j = 0; j < outCols; j++) {
-
-                // Read continuous right-side memory
-                int right_pos = (k * right_cols + j) * 2;
+                int right_pos = (k * r_stride + j) * 2;
                 float right_val = rightFloat ? halfToFloat(*(uint16_t*)(right_data + right_pos))
                     : (float)*(int16_t*)(right_data + right_pos);
 
-                // Accumulate natively at fp32 speed
                 accum[i * outCols + j] += left_val * right_val;
             }
         }
     }
 
-    // 4. Strict Memory Packing based on the correct type
     unsigned char* target_data = this->data;
+    int t_stride = this->stride;
+
     if(this->isFloat) {
-        for(int i = 0; i < outRows * outCols; i++) {
-            *(uint16_t*)(target_data + i * 2) = floatToHalf(accum[i]);
+        for(int i = 0; i < outRows; i++) {
+            for(int j = 0; j < outCols; j++) {
+                *(uint16_t*)(target_data + (i * t_stride + j) * 2) = floatToHalf(accum[i * outCols + j]);
+            }
         }
     } else {
-        for(int i = 0; i < outRows * outCols; i++) {
-            *(int16_t*)(target_data + i * 2) = (int16_t)accum[i];
+        for(int i = 0; i < outRows; i++) {
+            for(int j = 0; j < outCols; j++) {
+                *(int16_t*)(target_data + (i * t_stride + j) * 2) = (int16_t)accum[i * outCols + j];
+            }
         }
     }
-
     return *this;
 }
 
-// Single argument dot product just proxies to the dual-argument version
 TinyMatrix& TinyMatrix::dot(TinyMatrix& a) {
     return this->dot(*this, a);
 }
@@ -679,46 +791,42 @@ TinyMatrix& TinyMatrix::fixed_dot(TinyMatrix& a, TinyMatrix& b) {
         _accumIntCapacity = neededAccum;
     }
 
-    // Fast memory zeroing instead of allocation
     std::memset(_accumScratchInt, 0, neededAccum * sizeof(*_accumScratchInt));
     int32_t* accum = _accumScratchInt;
 
     unsigned char* left_data = left->data;
     unsigned char* right_data = right->data;
-    int left_cols = left->Cols();
-    int right_cols = right->Cols();
+    int l_stride = left->stride;
+    int r_stride = right->stride;
 
     for(int i = 0; i < outRows; i++) {
         for(int k = 0; k < innerDim; k++) {
-            // Read left ONCE per k-loop directly from memory
-            int32_t left_val = (int16_t) * (int16_t*)(left_data + (i * left_cols + k) * 2);
+            int32_t left_val = (int16_t) * (int16_t*)(left_data + (i * l_stride + k) * 2);
 
             for(int j = 0; j < outCols; j++) {
-                // Read right directly from memory
-                int32_t right_val = (int16_t) * (int16_t*)(right_data + (k * right_cols + j) * 2);
-
+                int32_t right_val = (int16_t) * (int16_t*)(right_data + (k * r_stride + j) * 2);
                 accum[i * outCols + j] += (left_val * right_val) >> 8;
             }
         }
     }
 
-    // Write back
     unsigned char* target_data = this->data;
-    for(int i = 0; i < outRows * outCols; i++) {
-        *(int16_t*)(target_data + i * 2) = (int16_t)accum[i];
+    int t_stride = this->stride;
+    for(int i = 0; i < outRows; i++) {
+        for(int j = 0; j < outCols; j++) {
+            *(int16_t*)(target_data + (i * t_stride + j) * 2) = (int16_t)accum[i * outCols + j];
+        }
     }
-
     return *this;
 }
 
 TinyMatrix& TinyMatrix::QuantizeQ88() {
-    this->multiply(256.0f); // Shift float left 8 bits mathematically
-    this->Ints();           // Strip float state and truncate to int16_t
+    this->multiply(256.0f);
+    this->Ints();
     return *this;
 }
 
 TinyMatrix& TinyMatrix::DequantizeQ88() {
-    // Multiplying an Int matrix by a float automatically promotes it back to fp16!
     this->multiply(1.0f / 256.0f);
     return *this;
 }
@@ -737,21 +845,16 @@ void TinyMatrix::print(std::string extra) {
 }
 
 TinyMatrix& TinyMatrix::transpose() {
-    // Snapshot into the dedicated transpose register instead of _scratch!
     _snapshotToRegister(_transposeScratch, this, _transposeScratchCapacity);
-
-    // Flip rows and columns
     this->Shape(_transposeScratch->Cols(), _transposeScratch->Rows());
 
     for(int i = 0; i < this->Rows(); i++) {
         for(int j = 0; j < this->Cols(); j++) {
-            // Read from (j, i) and write to (i, j)
             (*this)(i, j, (*_transposeScratch)(j, i));
         }
     }
     return *this;
 }
-
 
 nRet TinyMatrix::sum() {
     float total = 0.0f;
@@ -762,58 +865,48 @@ nRet TinyMatrix::sum() {
     }
     return nRet(total);
 }
+
 TinyMatrix& TinyMatrix::Floats() {
     this->isFloat = true;
     return *this;
 }
+
 TinyMatrix& TinyMatrix::Randomize(float min, float max) {
     for(int i = 0; i < this->rows; i++) {
         for(int j = 0; j < this->cols; j++) {
-            // Generate a random float between min and max
             float r = min + ((float)rand() / (RAND_MAX)) * (max - min);
 
+            int pos = (i * this->stride + j) * 2;
             if(this->isFloat) {
-                (*this)(i, j, r);
+                *(uint16_t*)(this->data + pos) = floatToHalf(r);
             } else {
-                (*this)(i, j, (int16_t)r);
+                *(int16_t*)(this->data + pos) = (int16_t)r;
             }
         }
     }
     return *this;
 }
 
-unsigned char* TinyMatrix::operator[](const int p) {
-    //return &this->data[(p)];
-    return &this->data[(p * 2)];
-}
-
-// =====================================================================
-// Capacity-aware scratch register helpers (allocation savings)
-// =====================================================================
-
-void TinyMatrix::_ensureScratchCapacity(TinyMatrix*& reg, size_t& capacity, int rows, int cols) {
-    size_t needed = size_t(makeEven(rows * cols)) * 2;
-
-    if(reg == nullptr || needed > capacity) {
-        delete reg;
-        reg = new TinyMatrix(rows, cols);
-        capacity = reg->size;
-    } else {
-        // Buffer is big enough — just update logical dimensions, no allocation
-        reg->rows = rows;
-        reg->cols = cols;
-        reg->size = (int)needed;
-    }
-}
-
 void TinyMatrix::_snapshotToRegister(TinyMatrix*& dest, const TinyMatrix* src, size_t& cap) {
     if(!src) return;
 
-    _ensureScratchCapacity(dest, cap, src->rows, src->cols);
+    if(dest == nullptr) {
+        dest = new TinyMatrix(src->rows, src->cols);
+        cap = dest->size;
+    }
 
-    if(dest && src && dest->data && src->data && dest->size >= src->size) {
-        std::memcpy(dest->data, src->data, src->size);
-        dest->isFloat = src->isFloat;
+    // Use the new capacity-aware tools to prep the scratchpad!
+    dest->Reserve(src->rows, src->cols);
+    dest->SetLogicalBounds(src->rows, src->cols);
+    dest->isFloat = src->isFloat;
+
+    for(int r = 0; r < src->rows; r++) {
+        for(int c = 0; c < src->cols; c++) {
+            int d_pos = (r * dest->stride + c) * 2;
+            int s_pos = (r * src->stride + c) * 2;
+            dest->data[d_pos] = src->data[s_pos];
+            dest->data[d_pos + 1] = src->data[s_pos + 1];
+        }
     }
 }
 
