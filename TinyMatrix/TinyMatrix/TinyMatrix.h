@@ -18,15 +18,9 @@
 #include <iostream>
 #include <cmath>
 #include <initializer_list>
-#include <cstring>   // for std::memcpy in _snapshotToRegister
+#include <cstring> 
+#include <immintrin.h>
 
-
-enum mapFuncs {
-    TPOS, PRINT, ADDS, SUBS, MULS, DOT, SUM, SUB, ADD, 
-    ADDR, SUBR, INTS, MULFS, RELU, SIGMOID, D_RELU, 
-    D_SIGMOID, HADAMARD, FIXED_DOT, FIXED_HADAMARD,
-    TANH, D_TANH, FIXED_TANH
-};
 
 typedef uint16_t HALF;
 
@@ -90,8 +84,24 @@ private:
     static thread_local TinyMatrix* _operandScratch;
     static thread_local size_t _scratchCapacity;
     static thread_local size_t _operandScratchCapacity;
+    static thread_local float* _accumScratch;
+    static thread_local size_t _accumCapacity;
+    static thread_local int32_t* _accumScratchInt;
+    static thread_local size_t _accumIntCapacity;
+    static thread_local TinyMatrix* _transposeScratch;
+    static thread_local size_t _transposeScratchCapacity; 
 
 public:
+    void WriteRaw(std::ostream& out) {
+        out.write((char*)&this->isFloat, sizeof(bool));
+        out.write((char*)this->data, this->size);
+    }
+
+    // Overwrites the raw memory block with bit-perfect accuracy
+    void ReadRaw(std::istream& in) {
+        in.read((char*)&this->isFloat, sizeof(bool));
+        in.read((char*)this->data, this->size);
+    }
     int Rows() {
         return this->rows;
     }
@@ -154,6 +164,12 @@ public:
         _scratch = nullptr;
         delete _operandScratch;
         _operandScratch = nullptr;
+        delete[] _accumScratch;      // Added
+        _accumScratch = nullptr;     // Added
+        delete[] _accumScratchInt;   // Added
+        _accumScratchInt = nullptr;  // Added
+        delete _transposeScratch;
+        _transposeScratch = nullptr;
     }
     TinyMatrix& fixed_tanh();
     void print(std::string extra = "");
@@ -162,12 +178,91 @@ public:
     TinyMatrix& dot(TinyMatrix& a, TinyMatrix& b);
     TinyMatrix& dot(TinyMatrix& a);
     TinyMatrix& Ints();
+    TinyMatrix& Floats();
     TinyMatrix& Randomize(float min = -1.0f, float max = 1.0f);
     nRet sum();
+    template <typename Func>
+    TinyMatrix& mapInline(Func operation, bool forceFloat = false) {
+        bool origFloat = this->isFloat;
+        bool targetFloat = origFloat || forceFloat;
+        this->isFloat = targetFloat;
 
+        int pos = 0; // Track sequentially
+        for(int i = 0; i < this->rows; i++) {
+            for(int j = 0; j < this->cols; j++) {
+
+                float val = origFloat ? halfToFloat(*(uint16_t*)(this->data + pos))
+                    : (float)*(int16_t*)(this->data + pos);
+
+                float result = operation(val, i, j);
+
+                if(targetFloat) {
+                    *(uint16_t*)(this->data + pos) = floatToHalf(result);
+                } else {
+                    *(int16_t*)(this->data + pos) = (int16_t)result;
+                }
+                pos += 2; // Move forward exactly one 16-bit block
+            }
+        }
+        return *this;
+    }
+
+    // For Matrix-to-Matrix element-wise operations
+    template <typename Func>
+    TinyMatrix& mapInline(TinyMatrix& other, Func operation, bool forceFloat = false) {
+        // Halt immediately if shapes don't match and aren't broadcastable
+        assert(((this->rows == other.rows && this->cols == other.cols) ||
+            (other.rows == 1 && other.cols == this->cols) ||
+            (other.cols == 1 && other.rows == this->rows) ||
+            (other.rows == 1 && other.cols == 1)) &&
+            "Matrix dimensions must match or be compatible for broadcasting!");
+
+        bool origFloat = this->isFloat;
+        bool otherFloat = other.IsFloat();
+        bool targetFloat = origFloat || otherFloat || forceFloat;
+        this->isFloat = targetFloat;
+
+        int pos = 0;
+        int other_pos = 0;
+
+        bool same_shape = (this->rows == other.rows && this->cols == other.cols);
+
+        for(int i = 0; i < this->rows; i++) {
+            // Lock row index to 0 if we are broadcasting a 1xN row vector
+            int other_i = (other.rows == 1) ? 0 : i;
+
+            for(int j = 0; j < this->cols; j++) {
+
+                // Recalculate other_pos ONLY if we are actively broadcasting
+                if(!same_shape) {
+                    int other_j = (other.cols == 1) ? 0 : j;
+                    other_pos = (other_i * other.cols + other_j) * 2;
+                }
+
+                float val1 = origFloat ? halfToFloat(*(uint16_t*)(this->data + pos))
+                    : (float)*(int16_t*)(this->data + pos);
+
+                float val2 = otherFloat ? halfToFloat(*(uint16_t*)(other.data + other_pos))
+                    : (float)*(int16_t*)(other.data + other_pos);
+
+                float result = operation(val1, val2, i, j);
+
+                if(targetFloat) {
+                    *(uint16_t*)(this->data + pos) = floatToHalf(result);
+                } else {
+                    *(int16_t*)(this->data + pos) = (int16_t)result;
+                }
+
+                pos += 2;
+                if(same_shape) {
+                    other_pos += 2; // Fast path for matching matrices
+                }
+            }
+        }
+        return *this;
+    }
 private:
     unsigned char* operator[](const int p);
-    void map(int n, void* o2_ret = nullptr, TinyMatrix* other = nullptr);
     static HALF floatToHalf(mFloat i);
     static float halfToFloat(mHalf y);
 
@@ -183,16 +278,17 @@ thread_local TinyMatrix* TinyMatrix::_scratch = nullptr;
 thread_local TinyMatrix* TinyMatrix::_operandScratch = nullptr;
 thread_local size_t TinyMatrix::_scratchCapacity = 0;
 thread_local size_t TinyMatrix::_operandScratchCapacity = 0;
+thread_local float* TinyMatrix::_accumScratch = nullptr;
+thread_local size_t TinyMatrix::_accumCapacity = 0;
+thread_local int* TinyMatrix::_accumScratchInt = nullptr;
+thread_local size_t TinyMatrix::_accumIntCapacity = 0;
+thread_local TinyMatrix* TinyMatrix::_transposeScratch = nullptr;
+thread_local size_t TinyMatrix::_transposeScratchCapacity = 0;
 
 constexpr auto makeEven(int a) {
     return (a + 1 ^ (~a & 1));
 }
-constexpr auto NOT_VOID = 1;
-constexpr auto NEEDS_COPY = 2;
-constexpr auto NEEDS_VAL = 4;
-constexpr auto NEEDS_OTHER = 8;
-constexpr auto RESHAPE = 16;
-constexpr auto AS_FLOAT = 32;
+
 // Allocate the 2KB of RAM for the Lookup Table
 int16_t TinyMatrix::tanh_lut[1024];
 
@@ -206,176 +302,21 @@ void TinyMatrix::InitLUT() {
     }
 }
 
-float print(float val, int r, int c, TinyMatrix* _this) {
-    if(_this->IsFloat()) {
-        printf("%.3f%s", val, ((c == 0 && r == 0) ? "\n" : (c == 0 ? "\n" : " ")));
-    } else {
-        printf("%d%s", (int16_t)val, ((c == 0 && r == 0) ? "\n" : (c == 0 ? "\n" : " ")));
-    }
-    return 0.0f;
-};
-
-
-float tpos(float val, float r, int c, TinyMatrix* d) {
-    //int pos = (r * (d->Cols()) + c);
-    return (*d)(c, (int)r);
-}
-
-float add(float val, float r, int c, TinyMatrix* _notused) {
-    return val + r;
-};
-
-float add2(float val, float r, int c, TinyMatrix* d) {
-    return val + (float)(*d)((int)r, c);
-};
-
-float sub(float val, float s, int _notused, TinyMatrix* _notused2) {
-    return val - s;
-};
-
-float sub2(float val, float r, int c, TinyMatrix* d) {
-    return (float)(*d)((int)r, c) - val;
-};
-
-float mul(float val, float s, int _notused, TinyMatrix* _notused2) {
-    return val * s;
-};
-
-float relu(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    // Add epsilon to prevent floating point noise from activating dead neurons
-    return val > 0.0001f ? val : 0.0f;
-}
-
-float d_relu(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    // Add epsilon to gradient calculations
-    return val > 0.0001f ? 1.0f : 0.0f;
-}
-
-float sigmoid(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    return 1.0f / (1.0f + std::exp(-val));
-}
-
-// Sigmoid Derivative: output * (1 - output)
-float d_sigmoid(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    return val * (1.0f - val);
-}
-
-// Element-wise Matrix Multiplication
-float hadamard(float val, float r, int c, TinyMatrix* d) {
-    return val * (float)(*d)((int)r, c);
-};
-
-// Q8.8 Fixed-Point Scalar/Dot Multiplication
-float fixed_mul(float val, float s, int _notused, TinyMatrix* _notused2) {
-    int32_t a = (int16_t)val;
-    int32_t b = (int16_t)s;
-    return (float)(int16_t)((a * b) >> 8);
-}
-
-// Q8.8 Fixed-Point Hadamard
-float fixed_hadamard_op(float val, float r, int c, TinyMatrix* d) {
-    int32_t a = (int16_t)val;
-    int32_t b = (int16_t)(*d)((int)r, c);
-    return (float)(int16_t)((a * b) >> 8);
-}
-
-float tanh_op(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    return std::tanh(val);
-}
-
-// Tanh Derivative: 1 - output^2
-float d_tanh_op(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    return 1.0f - (val * val);
-}
-
-// Fast O(1) Integer Array Lookup
-float fixed_tanh_op(float val, float _notused, int _notused2, TinyMatrix* _notused3) {
-    int16_t x = (int16_t)val;
-
-    // Tanh is symmetrical, so we only store positive numbers!
-    bool is_negative = (x < 0);
-    if(is_negative) x = -x;
-
-    int16_t result;
-    if(x >= 1024) {
-        result = 256; // If input > 4.0, it's fully saturated to 1.0 (256 in Q8.8)
-    } else {
-        result = TinyMatrix::tanh_lut[x]; // Grab pre-calculated value from RAM
-    }
-
-    if(is_negative) result = -result; // Restore the sign
-
-    return (float)result;
-}
-
-void* mFuncs[23] = {
-    &tpos,              // TPOS
-    &print,             // PRINT 
-    &add,               // ADDS
-    &sub,               // SUBS
-    &mul,               // MULS
-    &mul,               // DOT
-    &mul,               // SUM
-    &sub2,              // SUB
-    &add2,              // ADD
-    &add2,              // ADDR
-    &sub2,              // SUBR
-    &add2,              // INTS
-    &mul,               // MULFS
-    &relu,              // RELU
-    &sigmoid,           // SIGMOID
-    &d_relu,            // D_RELU
-    &d_sigmoid,         // D_SIGMOID
-    &hadamard,          // HADAMARD
-    &fixed_mul,         // FIXED_DOT
-    &fixed_hadamard_op, // FIXED_HADAMARD
-    &tanh_op,           // TANH
-    &d_tanh_op,         // D_TANH
-    &fixed_tanh_op      //FIXED_TANH
-};
-char  mFuncs_t[23] = {
-    (NOT_VOID | NEEDS_COPY),                         //Transpose
-    (NEEDS_VAL),                                     //Print
-    (NOT_VOID | NEEDS_VAL),                          //Add scalar ADDS
-    (NOT_VOID | NEEDS_VAL),                          //Subtract scalar
-    (NOT_VOID | NEEDS_VAL),                          //Multiply scalar
-    (NOT_VOID | NEEDS_OTHER),                        //Dot Product of 2 matricies or 1 matrix (autotransposes 2nd matrix or self if only 1 provided)
-    (NEEDS_VAL),                                     //Summation of matrix
-    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER),           //Subtract 1 matrix from self
-    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER),           //add matrix to self
-    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER | RESHAPE), //Subtract 1 matrix from self (reshape fill empty with 0s)
-    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER | RESHAPE), //add matrix to self (reshape fill empty with 0s)
-    (NOT_VOID | NEEDS_COPY),                         //converts half float matrix back to int16_t matrix
-    (NOT_VOID | NEEDS_VAL | AS_FLOAT),               //multiply by float scalar...
-    (NOT_VOID | NEEDS_VAL),                          // RELU (Just reads the val and overwrites it)
-    (NOT_VOID | NEEDS_VAL),                          // SIGMOID
-    (NOT_VOID | NEEDS_VAL),                          // D_RELU
-    (NOT_VOID | NEEDS_VAL),                          // D_SIGMOID
-    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER),           // HADAMARD
-    (NOT_VOID | NEEDS_OTHER),                        // FIXED_DOT (Copy whatever flag your standard DOT uses here!)
-    (NOT_VOID | NEEDS_COPY | NEEDS_OTHER),           // FIXED_HADAMARD
-    (NOT_VOID | NEEDS_VAL),                          // TANH
-    (NOT_VOID | NEEDS_VAL),                          // D_TANH
-    (NOT_VOID | NEEDS_VAL)                           // FIXED_TANH
-};
-
-
-
 TinyMatrix::TinyMatrix() {
     this->rows = 1; this->cols = 1; this->size = 4;
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
 }
 
 TinyMatrix::TinyMatrix(int r, int c) {
     this->rows = r; this->cols = c;
     this->size = (makeEven((r * c)) * 2);
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
 }
 
 TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<double> nums) {
     this->rows = r; this->cols = c;
     this->size = (makeEven((r * c)) * 2);
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
     this->isFloat = true;
 
     int i = 0;
@@ -389,7 +330,7 @@ TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<double> nums) {
 TinyMatrix::TinyMatrix(int r, int c, std::initializer_list<int> nums) {
     this->rows = r; this->cols = c;
     this->size = (makeEven((r * c)) * 2);
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
     this->isFloat = false;
 
     int i = 0;
@@ -405,7 +346,7 @@ void TinyMatrix::init(int r, int c) {
     delete[] this->data;                 // safe: all constructed objects own a valid buffer
     this->rows = r; this->cols = c;
     this->size = (makeEven((r * c)) * 2);
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
 }
 
 TinyMatrix::~TinyMatrix() {
@@ -416,7 +357,7 @@ TinyMatrix::TinyMatrix(const TinyMatrix& source) {
     this->rows = source.rows;
     this->cols = source.cols;
     this->size = source.size;
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
     this->isFloat = source.isFloat;
     std::copy(source.data, source.data + source.size, this->data);
 }
@@ -438,12 +379,13 @@ TinyMatrix& TinyMatrix::operator=(const TinyMatrix& source) {
     this->cols = source.cols;
     this->size = source.size;
     this->isFloat = source.isFloat;
-    this->data = new unsigned char[this->size] { 0 };
+    this->data = new unsigned char[this->size]();
     std::copy(source.data, source.data + source.size, this->data);
     return *this;
 }
 
 float TinyMatrix::operator()(int r, int c) {
+    assert(r >= 0 && r < this->rows && c >= 0 && c < this->cols && "Matrix Read Out of Bounds!");
     int pos = (r * (this->cols) + c);
     return (this->isFloat ? halfToFloat((uint16_t) * (uint16_t*)((*this)[pos])) : (float)*(int16_t*)((*this)[pos]));
 }
@@ -451,14 +393,23 @@ float TinyMatrix::operator()(int r, int c) {
 TinyMatrix& TinyMatrix::Shape(int r, int c, bool absolute) {
     if(this->rows == r && this->cols == c) return *this;
 
-    int old_r = this->rows; int old_c = this->cols; int old_size = this->size;
-    this->rows = r; this->cols = c;
+    int old_r = this->rows;
+    int old_c = this->cols;
+    int old_size = this->size;
+
+    this->rows = r;
+    this->cols = c;
     unsigned char* old_data = &this->data[0];
     this->size = (makeEven((r * c)) * 2);
 
+    // FIX: Fast-path to prevent unnecessary reallocation (and register capacity destruction)
+    if(!absolute && old_size == this->size) {
+        return *this;
+    }
+
     bool olim = (old_size <= this->size);
     if(absolute) {
-        this->data = new unsigned char[this->size] { 0 };
+        this->data = new unsigned char[this->size]();
         for(int rt = 0; rt < (olim ? old_r : this->rows); rt++) {
             for(int ct = 0; ct < (olim ? old_c : this->cols); ct++) {
                 int np = ((rt * this->cols) + ct) * 2;
@@ -473,16 +424,17 @@ TinyMatrix& TinyMatrix::Shape(int r, int c, bool absolute) {
                 }
             }
         }
-        delete[] old_data; // FIXED!
+        delete[] old_data;
     } else {
-        this->data = new unsigned char[this->size] { 0 };
+        this->data = new unsigned char[this->size]();
         std::copy(old_data, old_data + (old_size < this->size ? old_size : this->size), this->data);
-        delete[] old_data; // FIXED!
+        delete[] old_data;
     }
     return *this;
 }
 
 void TinyMatrix::operator()(int r, int c, const int v) {
+    assert(r >= 0 && r < this->rows && c >= 0 && c < this->cols && "Matrix Int Write Out of Bounds!");
     if(this->isFloat) {
         (*this)(r, c, (float)v); return;
     }
@@ -490,183 +442,272 @@ void TinyMatrix::operator()(int r, int c, const int v) {
     *(int16_t*)(*this)[pos] = (int16_t)v;
 }
 
-void TinyMatrix::operator()(int r, int c, const double v) {
-    TinyMatrix::operator()(r, c, (float)v);
-}
-
 void TinyMatrix::operator()(int r, int c, const float v) {
+    assert(r >= 0 && r < this->rows && c >= 0 && c < this->cols && "Matrix Float Write Out of Bounds!");
     this->isFloat = true;
     int pos = (r * (this->cols) + c);
     *(uint16_t*)(*this)[pos] = floatToHalf(v);
 }
 
+void TinyMatrix::operator()(int r, int c, const double v) {
+    TinyMatrix::operator()(r, c, (float)v);
+}
+
 float TinyMatrix::halfToFloat(mHalf y) {
-
-    mFloat ret(0.0f);
-    ret.parts.Sign = y.parts.Sign;
-
-    if(!y.parts.Exp) {
-        if(!y.parts.Frac) {
-            ret.parts.Exp = 0;
-            ret.parts.Frac = 0;
-        } else {
-            const float half_denorm = (1.0f / 16384.0f);
-            float mantissa = ((float)y.parts.Frac) / 1024.0f;
-            float sgn = (((float)y.parts.Sign) * 2.0f) - 1.0f;
-            ret.fVal = sgn * mantissa * half_denorm;
-        }
-    } else if(y.parts.Exp == 31) {
-        ret.parts.Exp = 0xff;
-        ret.parts.Frac = (y.parts.Frac != 0) ? 0x400000 : 0;
-    } else {
-
-        ret.parts.Exp = (uint32_t)y.parts.Exp + (127 - 15);
-        ret.parts.Frac = (uint32_t)y.parts.Frac << 13;
-    }
-
-    return ret.fVal;
+    __m128i v_half = _mm_cvtsi32_si128(y.uVal);
+    __m128 v_float = _mm_cvtph_ps(v_half);
+    return _mm_cvtss_f32(v_float);
 }
 
 HALF TinyMatrix::floatToHalf(mFloat i) {
-    if(i.fVal == 0.0f || i.fVal == -0.0f) {
-        mHalf zero(0);
-        zero.parts.Sign = i.parts.Sign;
-        return zero.uVal;
-    }
-
-    if(i.parts.Exp == 0xff) {
-        mHalf special(0);
-        special.parts.Sign = i.parts.Sign;
-        special.parts.Exp = 31;
-        // If it was NaN (Frac != 0), keep the Frac non-zero. Otherwise 0 for Inf.
-        special.parts.Frac = (i.parts.Frac != 0) ? 1 : 0;
-        return special.uVal;
-    }
-
-    mHalf ret(0);
-    ret.parts.Sign = i.parts.Sign;
-    int _3precision = (int)floor((i.fVal * 1000.0f));
-    float nf = _3precision / 999.875f;
-    i.fVal = (nf + 0.00006103515625f);
-
-    register int e = i.parts.Exp - 112;
-    register int f = i.parts.Frac;
-
-    if(e < 0) {
-        if(e < -10)
-            return ret.uVal;
-
-        f = (f | 0x00800000) >> (1 - e);
-        ret.parts.Frac = (f >> 13);
-        return ret.uVal;
-
-    } else if(e == 0xff - (112)) {
-        ret.parts.Frac = (i.parts.Frac != 0);
-        ret.parts.Exp = 31;
-        return ret.uVal;
-
-    } else {
-        if(e > 30) {
-            ret.parts.Exp = 31;
-            return ret.uVal;
-        }
-
-        ret.parts.Exp = e;
-        ret.parts.Frac = (f >> 13);
-        return ret.uVal;
-    }
+    __m128 v_float = _mm_set_ss(i.fVal);
+    __m128i v_half = _mm_cvtps_ph(v_float, 0);
+    return (HALF)_mm_extract_epi16(v_half, 0);
 }
 
 TinyMatrix& TinyMatrix::Ints() {
-    if(!this->isFloat)
-        return *this;
+    if(!this->isFloat) return *this;
 
-    this->map(mapFuncs::INTS);
-    return *this;
-}
+    for(int i = 0; i < this->Rows(); i++) {
+        for(int j = 0; j < this->Cols(); j++) {
+            float val = (*this)(i, j);
+            int pos = (i * this->Cols() + j) * 2;
 
-TinyMatrix& TinyMatrix::add(int s) {
-    float as = (float)s;
-    this->map(mapFuncs::ADDS, &as);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::sub(int s) {
-    float as = (float)s;
-    this->map(mapFuncs::SUBS, &as);
+            // Force the 16-bit integer cast directly into memory
+            *(int16_t*)(this->data + pos) = (int16_t)val;
+        }
+    }
+    this->isFloat = false;
     return *this;
 }
 
 TinyMatrix& TinyMatrix::add(float s) {
-    float as = s;
-    this->map(mapFuncs::ADDS, &as);
-    return *this;
+    bool promote = (!this->isFloat && s != (float)(int)s);
+    return this->mapInline([s](float val, int r, int c) { return val + s; }, promote);
 }
 
 TinyMatrix& TinyMatrix::sub(float s) {
-    float as = s;
-    this->map(mapFuncs::SUBS, &as);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::add(double s) {
-    this->add((float)s);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::sub(double s) {
-    this->sub((float)s);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::add(const TinyMatrix& a, bool reshape) {
-    if(reshape) {
-        this->map(mapFuncs::ADDR, (void*)&a);
-    } else {
-        this->map(mapFuncs::ADD, (void*)&a);
-    }
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::sub(const TinyMatrix& a, bool reshape) {
-    if(reshape) {
-        this->map(mapFuncs::SUBR, (void*)&a);
-    } else {
-        this->map(mapFuncs::SUB, (void*)&a);
-    }
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::multiply(int s) {
-    float as = (float)s;
-    this->map(mapFuncs::MULS, &as);
-    return *this;
+    bool promote = (!this->isFloat && s != (float)(int)s);
+    return this->mapInline([s](float val, int r, int c) { return val - s; }, promote);
 }
 
 TinyMatrix& TinyMatrix::multiply(float s) {
-    float as = (float)s;
-    if(this->isFloat) {
-        this->map(mapFuncs::MULS, &as);
-    } else {
-        this->map(mapFuncs::MULFS, &as);
-    }
-    return *this;
+    bool promote = (!this->isFloat && s != (float)(int)s);
+    return this->mapInline([s](float val, int r, int c) { return val * s; }, promote);
 }
 
+// Ensure the int/double overrides just forward to the float templates
+TinyMatrix& TinyMatrix::add(int s) {
+    return this->add((float)s);
+}
+TinyMatrix& TinyMatrix::sub(int s) {
+    return this->sub((float)s);
+}
+TinyMatrix& TinyMatrix::multiply(int s) {
+    return this->multiply((float)s);
+}
+TinyMatrix& TinyMatrix::add(double s) {
+    return this->add((float)s);
+}
+TinyMatrix& TinyMatrix::sub(double s) {
+    return this->sub((float)s);
+}
 TinyMatrix& TinyMatrix::multiply(double s) {
-    this->multiply((float)s);
-    return *this;
+    return this->multiply((float)s);
+}
+
+TinyMatrix& TinyMatrix::add(const TinyMatrix& a, bool reshape) {
+    if(reshape) this->Shape(((TinyMatrix&)a).Rows(), ((TinyMatrix&)a).Cols(), true);
+    return this->mapInline((TinyMatrix&)a, [](float v1, float v2, int r, int c) { return v1 + v2; });
+}
+
+TinyMatrix& TinyMatrix::sub(const TinyMatrix& a, bool reshape) {
+    if(reshape) this->Shape(((TinyMatrix&)a).Rows(), ((TinyMatrix&)a).Cols(), true);
+    return this->mapInline((TinyMatrix&)a, [](float v1, float v2, int r, int c) { return v1 - v2; });
+}
+
+TinyMatrix& TinyMatrix::hadamard(const TinyMatrix& a) {
+    return this->mapInline((TinyMatrix&)a, [](float v1, float v2, int r, int c) { return v1 * v2; });
+}
+
+TinyMatrix& TinyMatrix::fixed_hadamard(const TinyMatrix& a) {
+    return this->mapInline((TinyMatrix&)a, [](float v1, float v2, int r, int c) {
+        // Q8.8 Fixed-Point math baked directly into the lambda
+        int32_t x = (int16_t)v1;
+        int32_t y = (int16_t)v2;
+        return (float)(int16_t)((x * y) >> 8);
+        });
+}
+
+TinyMatrix& TinyMatrix::Relu() {
+    return this->mapInline([](float val, int r, int c) { return val > 0.0001f ? val : 0.0f; }, true);
+}
+
+TinyMatrix& TinyMatrix::D_Relu() {
+    return this->mapInline([](float val, int r, int c) { return val > 0.0001f ? 1.0f : 0.0f; }, true);
+}
+
+TinyMatrix& TinyMatrix::Sigmoid() {
+    return this->mapInline([](float val, int r, int c) { return 1.0f / (1.0f + std::exp(-val)); }, true);
+}
+
+TinyMatrix& TinyMatrix::D_Sigmoid() {
+    return this->mapInline([](float val, int r, int c) { return val * (1.0f - val); }, true);
+}
+
+TinyMatrix& TinyMatrix::Tanh() {
+    return this->mapInline([](float val, int r, int c) { return std::tanh(val); }, true);
+}
+
+TinyMatrix& TinyMatrix::D_Tanh() {
+    return this->mapInline([](float val, int r, int c) { return 1.0f - (val * val); }, true);
+}
+
+TinyMatrix& TinyMatrix::fixed_tanh() {
+    return this->mapInline([](float val, int r, int c) {
+        int16_t x = (int16_t)val;
+        bool is_negative = (x < 0);
+        if(is_negative) x = -x;
+
+        int16_t result = (x >= 1024) ? 256 : TinyMatrix::tanh_lut[x];
+        if(is_negative) result = -result;
+
+        return (float)result;
+        });
 }
 
 TinyMatrix& TinyMatrix::dot(TinyMatrix& a, TinyMatrix& b) {
+    // 1. Snapshot logic to prevent memory aliasing (Protects A.dot(A, B) scenarios)
+    _snapshotToRegister(_scratch, &a, _scratchCapacity);
+    TinyMatrix* left = _scratch;
+    TinyMatrix* right = &b;
 
-    this->map(mapFuncs::DOT, &a, &b);
+    // If the right operand is THIS matrix, snapshot it before we overwrite it
+    if(right == this) {
+        _snapshotToRegister(_operandScratch, right, _operandScratchCapacity);
+        right = _operandScratch;
+    }
+
+    int outRows = left->Rows();
+    int outCols = right->Cols();
+    int innerDim = left->Cols();
+
+    this->Shape(outRows, outCols);
+
+    // 2. Strict Type Promotion Logic restored
+    bool leftFloat = left->IsFloat();
+    bool rightFloat = right->IsFloat();
+    this->isFloat = leftFloat || rightFloat;
+
+    size_t neededAccum = (size_t)(outRows * outCols);
+    if(_accumScratch == nullptr || neededAccum > _accumCapacity) {
+        delete[] _accumScratch;
+        _accumScratch = new float[neededAccum];
+        _accumCapacity = neededAccum;
+    }
+
+    // Fast memory zeroing instead of allocation
+    std::memset(_accumScratch, 0, neededAccum * sizeof(float));
+    float* accum = _accumScratch;
+
+    unsigned char* left_data = left->data;
+    unsigned char* right_data = right->data;
+    int left_cols = left->Cols();
+    int right_cols = right->Cols();
+
+    for(int i = 0; i < outRows; i++) {
+        for(int k = 0; k < innerDim; k++) {
+
+            // Read and convert the left value EXACTLY ONCE per k-loop
+            int left_pos = (i * left_cols + k) * 2;
+            float left_val = leftFloat ? halfToFloat(*(uint16_t*)(left_data + left_pos))
+                : (float)*(int16_t*)(left_data + left_pos);
+
+            for(int j = 0; j < outCols; j++) {
+
+                // Read continuous right-side memory
+                int right_pos = (k * right_cols + j) * 2;
+                float right_val = rightFloat ? halfToFloat(*(uint16_t*)(right_data + right_pos))
+                    : (float)*(int16_t*)(right_data + right_pos);
+
+                // Accumulate natively at fp32 speed
+                accum[i * outCols + j] += left_val * right_val;
+            }
+        }
+    }
+
+    // 4. Strict Memory Packing based on the correct type
+    unsigned char* target_data = this->data;
+    if(this->isFloat) {
+        for(int i = 0; i < outRows * outCols; i++) {
+            *(uint16_t*)(target_data + i * 2) = floatToHalf(accum[i]);
+        }
+    } else {
+        for(int i = 0; i < outRows * outCols; i++) {
+            *(int16_t*)(target_data + i * 2) = (int16_t)accum[i];
+        }
+    }
+
     return *this;
 }
 
+// Single argument dot product just proxies to the dual-argument version
 TinyMatrix& TinyMatrix::dot(TinyMatrix& a) {
+    return this->dot(*this, a);
+}
 
-    this->map(mapFuncs::DOT, &a, nullptr);
+TinyMatrix& TinyMatrix::fixed_dot(TinyMatrix& a, TinyMatrix& b) {
+    _snapshotToRegister(_scratch, &a, _scratchCapacity);
+    TinyMatrix* left = _scratch;
+    TinyMatrix* right = &b;
+    if(&b == this) {
+        _snapshotToRegister(_operandScratch, &b, _operandScratchCapacity);
+        right = _operandScratch;
+    }
+
+    int outRows = left->Rows();
+    int outCols = right->Cols();
+    int innerDim = left->Cols();
+
+    this->Shape(outRows, outCols);
+    this->isFloat = false;
+
+    size_t neededAccum = (size_t)(outRows * outCols);
+    if(_accumScratchInt == nullptr || neededAccum > _accumIntCapacity) {
+        delete[] _accumScratchInt;
+        _accumScratchInt = new int32_t[neededAccum];
+        _accumIntCapacity = neededAccum;
+    }
+
+    // Fast memory zeroing instead of allocation
+    std::memset(_accumScratchInt, 0, neededAccum * sizeof(*_accumScratchInt));
+    int32_t* accum = _accumScratchInt;
+
+    unsigned char* left_data = left->data;
+    unsigned char* right_data = right->data;
+    int left_cols = left->Cols();
+    int right_cols = right->Cols();
+
+    for(int i = 0; i < outRows; i++) {
+        for(int k = 0; k < innerDim; k++) {
+            // Read left ONCE per k-loop directly from memory
+            int32_t left_val = (int16_t) * (int16_t*)(left_data + (i * left_cols + k) * 2);
+
+            for(int j = 0; j < outCols; j++) {
+                // Read right directly from memory
+                int32_t right_val = (int16_t) * (int16_t*)(right_data + (k * right_cols + j) * 2);
+
+                accum[i * outCols + j] += (left_val * right_val) >> 8;
+            }
+        }
+    }
+
+    // Write back
+    unsigned char* target_data = this->data;
+    for(int i = 0; i < outRows * outCols; i++) {
+        *(int16_t*)(target_data + i * 2) = (int16_t)accum[i];
+    }
+
     return *this;
 }
 
@@ -682,71 +723,49 @@ TinyMatrix& TinyMatrix::DequantizeQ88() {
     return *this;
 }
 
-TinyMatrix& TinyMatrix::fixed_dot(TinyMatrix& a, TinyMatrix& b) {
-    this->map(mapFuncs::FIXED_DOT, (void*)&a, &b);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::fixed_hadamard(const TinyMatrix& a) {
-    this->map(mapFuncs::FIXED_HADAMARD, (void*)&a);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::fixed_tanh() {
-    this->map(mapFuncs::FIXED_TANH);
-    return *this;
-}
-
 void TinyMatrix::print(std::string extra) {
-    this->map(mapFuncs::PRINT);
+    for(int i = 0; i < this->Rows(); i++) {
+        for(int j = 0; j < this->Cols(); j++) {
+            if(this->isFloat) {
+                printf("%.3f%s", (*this)(i, j), (j == this->Cols() - 1 ? "\n" : " "));
+            } else {
+                printf("%d%s", (int16_t)(*this)(i, j), (j == this->Cols() - 1 ? "\n" : " "));
+            }
+        }
+    }
     printf("%s", extra.c_str());
 }
 
-TinyMatrix& TinyMatrix::Relu() {
-    this->map(mapFuncs::RELU);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::Sigmoid() {
-    this->map(mapFuncs::SIGMOID);
-    return *this;
-}
-
 TinyMatrix& TinyMatrix::transpose() {
-    this->map(mapFuncs::TPOS);
-    return *this;
-}
-TinyMatrix& TinyMatrix::D_Relu() {
-    this->map(mapFuncs::D_RELU);
+    // Snapshot into the dedicated transpose register instead of _scratch!
+    _snapshotToRegister(_transposeScratch, this, _transposeScratchCapacity);
+
+    // Flip rows and columns
+    this->Shape(_transposeScratch->Cols(), _transposeScratch->Rows());
+
+    for(int i = 0; i < this->Rows(); i++) {
+        for(int j = 0; j < this->Cols(); j++) {
+            // Read from (j, i) and write to (i, j)
+            (*this)(i, j, (*_transposeScratch)(j, i));
+        }
+    }
     return *this;
 }
 
-TinyMatrix& TinyMatrix::D_Sigmoid() {
-    this->map(mapFuncs::D_SIGMOID);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::hadamard(const TinyMatrix& a) {
-    this->map(mapFuncs::HADAMARD, (void*)&a);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::Tanh() {
-    this->map(mapFuncs::TANH);
-    return *this;
-}
-
-TinyMatrix& TinyMatrix::D_Tanh() {
-    this->map(mapFuncs::D_TANH);
-    return *this;
-}
 
 nRet TinyMatrix::sum() {
-    nRet as;
-    this->map(mapFuncs::SUM, &as);
-    return as;
+    float total = 0.0f;
+    for(int i = 0; i < this->Rows(); i++) {
+        for(int j = 0; j < this->Cols(); j++) {
+            total += (*this)(i, j);
+        }
+    }
+    return nRet(total);
 }
-
+TinyMatrix& TinyMatrix::Floats() {
+    this->isFloat = true;
+    return *this;
+}
 TinyMatrix& TinyMatrix::Randomize(float min, float max) {
     for(int i = 0; i < this->rows; i++) {
         for(int j = 0; j < this->cols; j++) {
@@ -763,242 +782,6 @@ TinyMatrix& TinyMatrix::Randomize(float min, float max) {
     return *this;
 }
 
-void TinyMatrix::map(int n, void* o2_ret, TinyMatrix* other) {
-    if (_scratch == nullptr) {
-        _scratch = new TinyMatrix(1, 1);
-        _scratchCapacity = _scratch->size;
-    }
-    if (_operandScratch == nullptr) {
-        _operandScratch = new TinyMatrix(1, 1);
-        _operandScratchCapacity = _operandScratch->size;
-    }
-
-    TinyMatrix* scratchNib = nullptr;
-    TinyMatrix* o2_copy = nullptr;
-    float val = 0;
-    float sum = 0;
-
-    // Captured intended isFloat for the three scratch/"operand" buffers
-    // at the exact moment they were snapshotted or aliased. These are the
-    // only reliable values to pass to fastGet when reading those buffers.
-    bool scratch_snapshot_is_float = false;
-    bool other_snapshot_is_float   = false;
-    bool left_snapshot_is_float    = false;
-
-    float(*foo)(float, float, int, TinyMatrix*);
-    foo = (float(*)(float, float, int, TinyMatrix*))mFuncs[n];
-
-    // Fast direct buffer access helpers — defined early so they are available everywhere in map()
-    auto fastGet = [](unsigned char* base, int cols, bool isF, int r, int c) -> float {
-        int pos = (r * cols + c) * 2;
-        return isF ? halfToFloat(*(uint16_t*)(base + pos))
-                   : (float)*(int16_t*)(base + pos);
-    };
-
-    auto fastSet = [](unsigned char* base, int cols, bool isF, int r, int c, float v) {
-        int pos = (r * cols + c) * 2;
-        if (isF) {
-            *(uint16_t*)(base + pos) = floatToHalf(v);
-        } else {
-            *(int16_t*)(base + pos) = (int16_t)v;
-        }
-    };
-
-
-    if(mFuncs_t[n] & (NEEDS_COPY | NEEDS_OTHER)) {
-        if(mFuncs_t[n] & NEEDS_COPY) {
-            _snapshotToRegister(_scratch, this, _scratchCapacity);
-            scratchNib = _scratch;
-            scratch_snapshot_is_float = this->isFloat;
-        }
-        if(mFuncs_t[n] & NEEDS_OTHER && !(mFuncs_t[n] & NEEDS_COPY)) {
-            assert(other != nullptr || o2_ret != nullptr);
-            if(o2_ret != nullptr && other == nullptr)
-                other = (TinyMatrix*)o2_ret;
-            _snapshotToRegister(_scratch, other, _scratchCapacity);
-            scratchNib = _scratch;
-            scratch_snapshot_is_float = other->isFloat;
-            if(n == mapFuncs::DOT || n == mapFuncs::FIXED_DOT) {
-                if(scratchNib->rows != ((TinyMatrix*)o2_ret)->cols && scratchNib->cols == ((TinyMatrix*)o2_ret)->cols) {
-                    //other matrix was provided but not transposed or DOT with self
-                    scratchNib->map(mapFuncs::TPOS);
-                }
-            }
-        }
-        if(n == mapFuncs::TPOS) {
-            this->Shape(this->cols, this->rows);
-        }
-        if(n == mapFuncs::INTS) {
-            this->isFloat = false;
-        }
-        assert(scratchNib != nullptr);
-    }
-    TinyMatrix* leftOperand = nullptr;
-
-    if(n == mapFuncs::DOT || n == mapFuncs::FIXED_DOT) {
-        assert(o2_ret != nullptr);
-        TinyMatrix* o2_matrix = (TinyMatrix*)o2_ret;
-
-        if(this == o2_matrix) {
-            _snapshotToRegister(_operandScratch, o2_matrix, _operandScratchCapacity);
-            leftOperand = _operandScratch;
-            left_snapshot_is_float = o2_matrix->isFloat;
-        } else {
-            leftOperand = o2_matrix;
-            left_snapshot_is_float = o2_matrix->isFloat;
-        }
-
-        if(this->cols != scratchNib->cols || this->rows != leftOperand->rows) {
-            this->Shape(leftOperand->rows, scratchNib->cols);
-        }
-
-        if(scratchNib->isFloat || leftOperand->isFloat) {
-            this->isFloat = true;
-        }
-    }
-
-    // Decide once (before the hot loop) whether we need a reshaped copy of the "other" operand.
-    // This logic was previously re-evaluated on every element for binary matrix ops.
-    // Guarded strictly to only the opcodes that use o2_copy / fromMatrix.
-    if (n == mapFuncs::ADD || n == mapFuncs::SUB || n == mapFuncs::SUBR ||
-        n == mapFuncs::ADDR || n == mapFuncs::HADAMARD || n == mapFuncs::FIXED_HADAMARD) {
-
-        if (scratchNib != nullptr) {
-            assert(o2_ret != nullptr);
-
-            bool need_reshaped_o2 = (o2_copy == nullptr) &&
-                ((mFuncs_t[n] & RESHAPE) ||
-                 (((TinyMatrix*)o2_ret)->rows != scratchNib->rows ||
-                  ((TinyMatrix*)o2_ret)->cols != scratchNib->cols));
-
-            if (need_reshaped_o2) {
-                _snapshotToRegister(_operandScratch, (TinyMatrix*)o2_ret, _operandScratchCapacity);
-                _operandScratch->Shape(scratchNib->rows, scratchNib->cols, true);
-                o2_copy = _operandScratch;
-                other_snapshot_is_float = ((TinyMatrix*)o2_ret)->isFloat;
-            } else if (o2_copy == nullptr) {
-                o2_copy = (TinyMatrix*)o2_ret;
-                other_snapshot_is_float = ((TinyMatrix*)o2_ret)->isFloat;
-            }
-            assert(o2_copy->rows == scratchNib->rows && o2_copy->cols == scratchNib->cols);
-        }
-    }
-
-    for(int i = 0; i < this->rows; i++) {
-        for(int j = 0; j < this->cols; j++) {
-            if(mFuncs_t[n] & NEEDS_VAL) {
-                if(mFuncs_t[n] & AS_FLOAT) this->isFloat = false;
-                val = fastGet(this->data, this->cols, this->isFloat, i, j);
-            }
-            if(mFuncs_t[n] & NOT_VOID) {
-                if(scratchNib != nullptr) {
-                    switch(n) {
-                    case mapFuncs::DOT:
-                    case mapFuncs::FIXED_DOT:
-                        sum = 0;
-                        // Fast direct access using captured snapshot isFloat (avoids fragile object state)
-                        for(int a = 0; a < leftOperand->cols; a++) {
-                            float sVal = fastGet(scratchNib->data, scratchNib->cols, scratch_snapshot_is_float, a, j);
-                            float lVal = fastGet(leftOperand->data, leftOperand->cols, left_snapshot_is_float, i, a);
-                            sum += foo(sVal, lVal, 0, nullptr);
-                        }
-
-                        if(this->isFloat) {
-                            fastSet(this->data, this->cols, this->isFloat, i, j, sum);
-                        } else {
-                            fastSet(this->data, this->cols, false, i, j, sum);
-                        }
-                        break;
-                    case mapFuncs::SUB:
-                    case mapFuncs::ADD:
-                    case mapFuncs::SUBR:
-                    case mapFuncs::ADDR:
-                    case mapFuncs::HADAMARD:
-                    case mapFuncs::FIXED_HADAMARD:
-                        // o2_copy decision hoisted before the loop (see above)
-                        assert(o2_copy && o2_copy->rows == scratchNib->rows && o2_copy->cols == scratchNib->cols);
-                    default:
-                        TinyMatrix* fromMatrix = (o2_copy != nullptr ? o2_copy : scratchNib);
-                        if((mFuncs_t[n] & NEEDS_COPY) && (mFuncs_t[n] & NEEDS_OTHER))
-                            val = fastGet(fromMatrix->data, fromMatrix->cols, other_snapshot_is_float, i, j);
-
-                        // Fast direct access using captured snapshot isFloat for the "this" side
-                        float this_val = fastGet(scratchNib->data, scratchNib->cols, scratch_snapshot_is_float, i, j);
-
-                        float result;
-                        if (n == mapFuncs::ADD || n == mapFuncs::ADDR) {
-                            result = val + this_val;
-                        } else if (n == mapFuncs::SUB) {
-                            result = this_val - val;
-                        } else if (n == mapFuncs::SUBR) {
-                            result = val - this_val;
-                        } else if (n == mapFuncs::HADAMARD) {
-                            result = val * this_val;
-                        } else if (n == mapFuncs::FIXED_HADAMARD) {
-                            result = foo(val, (float)i, j, scratchNib);  // keep fixed-point integer math
-                        } else {
-                            result = foo(val, (float)i, j, scratchNib);
-                        }
-
-                        bool write_as_float = this->isFloat || fromMatrix->isFloat && n != mapFuncs::INTS;
-                        if (write_as_float) {
-                            this->isFloat = true;
-                        }
-                        fastSet(this->data, this->cols, this->isFloat, i, j, result);
-                        break;
-                    }
-                } else {
-                    switch(n) {
-                        // --- SCALAR MATH ---
-                    case mapFuncs::ADDS:
-                    case mapFuncs::SUBS:
-                    case mapFuncs::MULS:
-                    case mapFuncs::MULFS:
-                        if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
-                            if (mFuncs_t[n] & AS_FLOAT) {
-                                this->isFloat = true;
-                            }
-                            float r = foo(val, *(float*)o2_ret, 0, nullptr);
-                            fastSet(this->data, this->cols, this->isFloat, i, j, r);
-                        } else {
-                            float r = foo(val, (int16_t)(*(float*)o2_ret), 0, nullptr);
-                            fastSet(this->data, this->cols, false, i, j, r);
-                        }
-                        break;
-
-                        // --- NEURAL NETWORK ACTIVATIONS ---
-                    case mapFuncs::RELU:
-                    case mapFuncs::SIGMOID:
-                    case mapFuncs::TANH:
-                    case mapFuncs::D_RELU:
-                    case mapFuncs::D_SIGMOID:
-                    case mapFuncs::D_TANH:
-                    case mapFuncs::FIXED_TANH:
-                        if(this->isFloat || (mFuncs_t[n] & AS_FLOAT)) {
-                            float r = foo(val, 0.0f, 0, nullptr);
-                            fastSet(this->data, this->cols, this->isFloat, i, j, r);
-                        } else {
-                            float r = foo(val, 0.0f, 0, nullptr);
-                            fastSet(this->data, this->cols, false, i, j, r);
-                        }
-                        break;
-
-                    default:
-                        break;
-                    }
-                }
-            } else {
-                if(n == mapFuncs::PRINT)
-                    foo(val, (float)(this->rows - i - 1), (this->cols - j - 1), this);
-
-                if(n == mapFuncs::SUM)
-                    *(nRet*)o2_ret += val;
-            }
-        }
-    }
-
-}
-
 unsigned char* TinyMatrix::operator[](const int p) {
     //return &this->data[(p)];
     return &this->data[(p * 2)];
@@ -1011,7 +794,7 @@ unsigned char* TinyMatrix::operator[](const int p) {
 void TinyMatrix::_ensureScratchCapacity(TinyMatrix*& reg, size_t& capacity, int rows, int cols) {
     size_t needed = size_t(makeEven(rows * cols)) * 2;
 
-    if (reg == nullptr || needed > capacity) {
+    if(reg == nullptr || needed > capacity) {
         delete reg;
         reg = new TinyMatrix(rows, cols);
         capacity = reg->size;
@@ -1024,11 +807,11 @@ void TinyMatrix::_ensureScratchCapacity(TinyMatrix*& reg, size_t& capacity, int 
 }
 
 void TinyMatrix::_snapshotToRegister(TinyMatrix*& dest, const TinyMatrix* src, size_t& cap) {
-    if (!src) return;
+    if(!src) return;
 
     _ensureScratchCapacity(dest, cap, src->rows, src->cols);
 
-    if (dest && src && dest->data && src->data && dest->size >= src->size) {
+    if(dest && src && dest->data && src->data && dest->size >= src->size) {
         std::memcpy(dest->data, src->data, src->size);
         dest->isFloat = src->isFloat;
     }
