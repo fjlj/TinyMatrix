@@ -22,17 +22,8 @@ Key Features
 *   **IEEE-754 Bulletproof:** Custom bit-shifting translation layer safely traps and converts extreme floating-point states like 0.0f, Infinity, and Quiet NaNs without triggering undefined compiler behavior.
     
 *   **Zero Dependencies:** Pure C++. No external math libraries required.
+    
 
-## Integration
-
-TinyMatrix uses a single-header implementation pattern. To integrate the library into your project:
-
-1. Include `TinyMatrix.h` in your project.
-2. In **exactly one** `.cpp` file, define the implementation macro before including the header:
-```c++
-    #define TINYMATRIX_IMPLEMENTATION
-    #include "TinyMatrix.h"
-```
 Quick Start
 -----------
 
@@ -42,21 +33,7 @@ TinyMatrix uses a clean initialization syntax and intelligently handles type pro
 
 C++
 
-```c++
-#define TINYMATRIX_IMPLEMENTATION
-#include "TinyMatrix.h"
-
-// Initialize with modern C++ initializer lists
-TinyMatrix IntMat(2, 2, { 1, 2, 3, 4 });
-TinyMatrix FloatMat(2, 2, { 1.5, -2.5, 3.14, 4.0 });
-
-// Operations can be elegantly chained
-IntMat.add(5).multiply(2);
-
-// Dot Product with auto-reshaping
-TinyMatrix Output;
-Output.dot(IntMat, FloatMat);
-```
+C++`#include "TinyMatrix.h"  // Initialize with modern C++ initializer lists  TinyMatrix IntMat(2, 2, { 1, 2, 3, 4 });  TinyMatrix FloatMat(2, 2, { 1.5, -2.5, 3.14, 4.0 });  // Operations can be elegantly chained  IntMat.add(5).multiply(2);  // Dot Product with auto-reshaping  TinyMatrix Output;  Output.dot(IntMat, FloatMat);` 
 
 ### 2\. Neural Network Operations
 
@@ -64,23 +41,7 @@ The engine is purpose-built to act as a computational graph for machine learning
 
 C++
 
-```c++
-TinyMatrix Inputs(1, 3, { 0.5, -1.2, 3.3 });
-TinyMatrix Weights(3, 3, { ... });
-TinyMatrix Biases(1, 3, { ... });
-
-// --- Forward Propagation ---  //
-Output = (Inputs • Weights) + Biases -> Sigmoid Activation  TinyMatrix Output;
-Output.dot(Inputs, Weights).add(Biases).Sigmoid();
-
-// --- Backpropagation (Delta Calculation) ---  //
-TinyMatrix Error = Output;
-Error.sub(Target);
-TinyMatrix Derivative = Output;
-Derivative.D_Sigmoid();  // Calculate gradient curve
-TinyMatrix Delta = Error;
-Delta.hadamard(Derivative); // Element-wise multiplication
-```
+C++`   TinyMatrix Inputs(1, 3, { 0.5, -1.2, 3.3 });  TinyMatrix Weights(3, 3, { ... });  TinyMatrix Biases(1, 3, { ... });  // --- Forward Propagation ---  // Output = (Inputs • Weights) + Biases -> Sigmoid Activation  TinyMatrix Output;  Output.dot(Inputs, Weights).add(Biases).Sigmoid();  // --- Backpropagation (Delta Calculation) ---  TinyMatrix Error = Output;  Error.sub(Target);   TinyMatrix Derivative = Output;   Derivative.D_Sigmoid();     // Calculate gradient curve  TinyMatrix Delta = Error;         Delta.hadamard(Derivative); // Element-wise multiplication   `
 
 ### 3\. Edge-Case Safety
 
@@ -88,9 +49,7 @@ TinyMatrix handles extreme edge cases gracefully. You can reshape arrays on the 
 
 C++
 
-```c++
-TinyMatrix ExtremeMat(2, 2, {std::numeric_limits::infinity(), std::numeric_limits::quiet_NaN(), 0.0f, 65504.0f });
-```
+C++`   TinyMatrix ExtremeMat(2, 2, {       std::numeric_limits::infinity(),       std::numeric_limits::quiet_NaN(),       0.0f,       65504.0f   });   `
 
 Testing
 -------
